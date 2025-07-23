@@ -255,8 +255,7 @@ class MixtureModel:
             log_posterior = log_numerator - log_denominator    # (N, K)
             posterior = np.exp(log_posterior) # responsibilities (N, K)
 
-            ll = np.sum(log_p * posterior)
-            logger.append(ll)
+            logger.append(log_denominator.sum())
 
             # M-step: Maximize weighted log-likelihood
             # update priors
