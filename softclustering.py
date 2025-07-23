@@ -2,7 +2,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 from scipy.optimize import minimize
 from scipy.special import i0, i1, logsumexp
-from functools import cached_property
+from sklearn.cluster import KMeans
 
 
 # -------------------- Base --------------------
@@ -18,8 +18,13 @@ class ExponentialFamily(ABC):
         return np.exp(self.log_pdf(np.asarray(X, dtype=float)))
 
     @abstractmethod
-    def fit_MLE(self, X:np.ndarray, weights: np.ndarray | None):
+    def fit_MLE(self, X: np.ndarray, weights: np.ndarray | None = None):
         pass
+
+    @staticmethod
+    def _normalize_weights(weights: np.ndarray) -> np.ndarray:
+        w = np.asarray(weights, dtype=float)
+        return w / w.sum()
 
 
 # -------------------- Univariate Gaussian --------------------
@@ -45,7 +50,7 @@ class UnivariateGaussian(ExponentialFamily):
         ])
         self.dual_param = np.array([
             self.mean,
-            self.mean**2 + self.variance
+            self.mean ** 2 + self.variance
         ])
 
     # ---- setters ----
@@ -67,7 +72,7 @@ class UnivariateGaussian(ExponentialFamily):
     def set_dual_params(self, eta: np.ndarray) -> None:
         eta = np.asarray(eta, dtype=float)
         eta1, eta2 = eta
-        var = eta2 - eta1**2
+        var = eta2 - eta1 ** 2
         if var <= 0:
             raise ValueError("eta2 - eta1^2 must be > 0.")
         self.mean = eta1
@@ -81,15 +86,20 @@ class UnivariateGaussian(ExponentialFamily):
 
     # pdf inherited from base
 
+    # ---- calibration ----
+    def fit_MLE(self, X: np.ndarray, weights: np.ndarray | None = None):
+        pass
+
     def __repr__(self) -> str:
         return f"UnivariateGaussian(mean={self.mean:.5g}, variance={self.variance:.5g})"
 
+
 # -------------------- Multivariate Gaussian --------------------
 class MultivariateGaussian(ExponentialFamily):
-    def __init__(self, mean: np.ndarray, covariance: np.ndarray):
+    def __init__(self, mean: np.ndarray | None = None, covariance: np.ndarray | None = None):
         super().__init__()
-        self.mean = np.asarray(mean, dtype=float)
-        self.covariance = np.asarray(covariance, dtype=float)
+        self.mean = np.zeros(2) if mean is None else np.asarray(mean, dtype=float)
+        self.covariance = np.eye(self.mean.size) if covariance is None else np.asarray(covariance, dtype=float)
         self._validate()
         self._cache()
 
@@ -136,15 +146,15 @@ class MultivariateGaussian(ExponentialFamily):
     def fit_MLE(self, X: np.ndarray, weights: np.ndarray | None = None):
         X = np.asarray(X, dtype=float)
         if weights is None:
-            weights = np.ones(X.shape[0], dtype=float)
+            weights = np.ones(X.shape[0], dtype=float) / X.shape[0]
         else:
-            weights = np.asarray(weights, dtype=float)
-        w_sum = weights.sum()
+            weights = self._normalize_weights(weights)
+
         mu = np.average(X, axis=0, weights=weights)
         diff = X - mu
         # Broadcasting weights to columns; (N,1) * (N,d) -> weighted rows
         weighted_diff = weights[:, np.newaxis] * diff
-        cov = weighted_diff.T @ diff / w_sum
+        cov = weighted_diff.T @ diff
         # Numerical jitter if near-singular
         cov += 1e-9 * np.eye(cov.shape[0])
 
@@ -154,9 +164,10 @@ class MultivariateGaussian(ExponentialFamily):
         self._cache()
 
     def __repr__(self):
-        return f"MultivariateGaussian(d={self.d})"
+        return f"MultivariateGaussian(d={self.d}, mean={self.mean}, cov={self.covariance})"
 
 
+# -------------------- Von Mises --------------------
 class VonMises(ExponentialFamily):
     def __init__(self, loc=0.0, kappa=0.01):
         super().__init__()
@@ -188,9 +199,9 @@ class VonMises(ExponentialFamily):
     def fit_MLE(self, X: np.ndarray, weights: np.ndarray | None = None):
         X = np.asarray(X, dtype=float)
         if weights is None:
-            weights = np.ones(X.shape[0], dtype=float)
+            weights = np.ones(X.shape[0], dtype=float) / X.shape[0]
         else:
-            weights = np.asarray(weights, dtype=float)
+            weights = self._normalize_weights(weights)
         const = np.log(2 * np.pi)
 
         def neg_ll(params):
@@ -215,18 +226,65 @@ class VonMises(ExponentialFamily):
         self._update_params()
         return result
 
+    def fit_MLE_approx(self, X: np.ndarray, weights: np.ndarray | None = None):
+        X = np.asarray(X, dtype=float)
+        if weights is None:
+            weights = np.ones(X.shape[0], dtype=float) / X.shape[0]
+        else:
+            weights = self._normalize_weights(weights)
+
+        C = np.sum(weights * np.cos(X))
+        S = np.sum(weights * np.sin(X))
+        loc = np.arctan2(S, C)
+        R = min(np.sqrt(C * C + S * S), 0.99)
+        kappa = R * (2 - R * R) / (1 - R * R)
+
+        self.loc, self.kappa = loc, kappa
+        self._update_params()
+        return loc, kappa
+
     def __repr__(self):
         return f"VonMises(loc={self.loc:.3f}, kappa={self.kappa:.3f})"
 
 
+# -------------------- Mixture Model --------------------
 class MixtureModel:
-    def __init__(self, components: list[ExponentialFamily], weights: np.ndarray):
-        if len(components) != weights.size:
-            raise ValueError("Components and weights mismatch.")
-        if not np.isclose(weights.sum(), 1):
-            raise ValueError("Weights must sum to 1.")
+    def __init__(self, components: list[ExponentialFamily], weights: np.ndarray | None = None):
         self.components = components
-        self.weights = weights
+        self.n_clusters = len(components)
+        if weights is not None:
+            weights = np.asarray(weights, dtype=float)
+            if weights.ndim != 1 or weights.size != self.n_clusters:
+                raise ValueError("Components and weights mismatch.")
+            if np.any(weights <= 0):
+                raise ValueError("All weights must be > 0.")
+            self.weights = weights / weights.sum()
+            self.is_initialized = True
+        else:
+            self.weights = None
+            self.is_initialized = False
+
+    def _initialize(self, X:np.ndarray):
+        X = np.asarray(X, dtype=float)
+        labels = KMeans(n_clusters=self.n_clusters, init='k-means++', random_state=0).fit_predict(X)
+        N = X.shape[0]
+        posteriors = np.zeros((N, self.n_clusters))
+        posteriors[np.arange(N), labels] = 1.0
+        # if there's an empty cluster, then uniform posterior probability
+        counts = posteriors.sum(axis=0)
+        zeros = counts == 0
+
+        for j, dist in enumerate(self.components):
+            if not zeros[j]:
+                dist.fit_MLE(X, weights= posteriors[:,j])
+            else:
+                dist.fit_MLE(X, weights=None)
+
+        if np.any(zeros):
+            counts = np.maximum(counts, 0.001) # may be a problem, but let's see
+        self.weights = counts / counts.sum()
+
+        self.is_initialized = True
 
     def log_pdf_components(self, X: np.ndarray) -> np.ndarray:
         """
@@ -236,35 +294,48 @@ class MixtureModel:
         X = np.asarray(X, dtype=float)
         return np.column_stack([c.log_pdf(X) for c in self.components])
 
-    def pdf(self, x):
-        return sum(w * c.pdf(x) for w, c in zip(self.weights, self.components))
+    def log_pdf(self, X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=float)
+        log_pi = np.log(self.weights)
+        return logsumexp(self.log_pdf_components(X) + log_pi, axis=1)
+
+    def pdf(self, X):
+        return np.exp(self.log_pdf(X))
+
+    def _e_step(self, X):
+        # E-step: Compute the posterior
+        # take log to prevent underflow
+        log_prior = np.log(self.weights)  # (K,)
+        log_p = self.log_pdf_components(X)  # (N, K)
+        log_numerator = log_prior + log_p  # (N, K)
+        log_denominator = logsumexp(log_numerator, axis=1, keepdims=True)  # (N, 1)
+        log_posterior = log_numerator - log_denominator  # (N, K)
+        posterior = np.exp(log_posterior)  # responsibilities (N, K)
+        log_likelihood = log_denominator.sum()
+        return posterior, log_likelihood
 
     def fit_classical_EM(self, X, tol=1e-6, max_iter=200, verbose=False):
-        X = np.asarray(X)
+        X = np.asarray(X, dtype=float)
         N = X.shape[0]
-        K = len(self.components)
-
+        if not self.is_initialized:
+            self._initialize(X)
         logger = []
         for it in range(max_iter):
             # E-step: Compute the posterior
-            # take log to prevent underflow
-            log_prior = np.log(self.weights)       # (K,)
-            log_p = self.log_pdf_components(X)     # (N, K)
-            log_numerator =  log_prior +  log_p    # (N, K)
-            log_denominator = logsumexp(log_numerator, axis=1, keepdims=True)  # (N, 1)
-            log_posterior = log_numerator - log_denominator    # (N, K)
-            posterior = np.exp(log_posterior) # responsibilities (N, K)
-
-            logger.append(log_denominator.sum())
+            posterior, log_likelihood = self._e_step(X)
+            logger.append(log_likelihood)
 
             # M-step: Maximize weighted log-likelihood
             # update priors
-            self.weights = posterior.sum(axis=0) / N # effective counts (K,)
+            self.weights = posterior.sum(axis=0) / N  # effective counts (K,)
             # update distribution parameters
             for k, comp in enumerate(self.components):
                 comp.fit_MLE(X, posterior[:, k])
 
-            # ---------- Check convergence ----------
+            # verbose
+            if verbose:
+                print(f"Data log-likelihood at iter {it}: {logger[-1]:.2f}")
+            # check convergence
             if it > 0 and abs(logger[-1] - logger[-2]) < tol:
                 if verbose:
                     print(f"Converged at iter {it}: Delta LL={logger[-1] - logger[-2]:.3e}")
@@ -273,3 +344,49 @@ class MixtureModel:
             if verbose:
                 print("Reached max_iter without full convergence.")
         return logger
+
+    def fit_EM_VonMises_approx(self, X, tol=1e-6, max_iter=200, verbose=False):
+        if not all(isinstance(c, VonMises) for c in self.components):
+            raise TypeError("All components must be VonMises.")
+
+        X = np.asarray(X, dtype=float)
+        N = X.shape[0]
+        if not self.is_initialized:
+            self._initialize(X)
+        logger = []
+        for it in range(max_iter):
+            # E-step: Compute the posterior
+            posterior, log_likelihood = self._e_step(X)
+            logger.append(log_likelihood)
+
+            # M-step: Maximize weighted log-likelihood
+            # update priors
+            self.weights = posterior.sum(axis=0) / N  # effective counts (K,)
+            # update distribution parameters
+            for k, comp in enumerate(self.components):
+                comp.fit_MLE_approx(X, posterior[:, k])
+
+            # ---------- Check convergence ----------
+            if it > 10 and abs(logger[-1] - logger[-2]) < tol:
+                if verbose:
+                    print(f"Converged at iter {it}: Delta LL={logger[-1] - logger[-2]:.3e}")
+                break
+        else:
+            if verbose:
+                print("Reached max_iter without full convergence.")
+        return logger
+
+
+def initial_priors(X:np.ndarray, n_clusters: int) -> np.ndarray:
+    """
+    Obtain initial guess for mixture's priors using KMeans++ algorithm.
+    prior_j = (1/N) * sum_i^N I{x_i in cluster_j}
+    :return:
+    (n_clusters,) np.array of prior probabilities.
+    """
+    X = np.asarray(X, dtype=float)
+    labels = KMeans(n_clusters=n_clusters, init='k-means++', random_state=0).fit_predict(X)
+    counts = np.bincount(labels, minlength=n_clusters).astype(float)  # count how many of each distinct integer
+    # protect against empty clusters
+    counts = np.maximum(counts, 1e-12)
+    return counts / counts.sum()
