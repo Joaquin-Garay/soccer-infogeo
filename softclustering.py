@@ -169,6 +169,11 @@ class MultivariateGaussian(ExponentialFamily):
 
 # -------------------- Von Mises --------------------
 class VonMises(ExponentialFamily):
+    """
+    Von Mises distribution for directional data. X must be in sufficient statistic form:
+    [cos x, sin x].
+    """
+
     def __init__(self, loc=0.0, kappa=0.01):
         super().__init__()
         if kappa <= 0:
@@ -191,7 +196,8 @@ class VonMises(ExponentialFamily):
     # ----- densities -----
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=float)
-        return self.kappa * np.cos(X - self.loc) - np.log(2 * np.pi * i0(self.kappa))
+        log_partition = np.log(2 * np.pi * i0(self.kappa))
+        return X @ self.natural_param - log_partition
 
     # pdf inherited from base
 
@@ -208,11 +214,11 @@ class VonMises(ExponentialFamily):
             loc, kappa = params
             if kappa <= 0:
                 return np.inf
-            ll = np.sum(weights * (kappa * np.cos(X - loc) - np.log(i0(kappa)) - const))
+            ll = np.sum(weights * (kappa * (np.cos(loc) * X[:,0] + np.sin(loc) * X[:,1]) - np.log(i0(kappa)) - const))
             return -ll  # minimize negative
 
-        C = np.sum(weights * np.cos(X))
-        S = np.sum(weights * np.sin(X))
+        C = np.sum(weights * X[:, 0])
+        S = np.sum(weights * X[:, 1])
         initials = np.array([np.arctan2(S, C), 1.0])
         bnds = ((-np.pi, np.pi), (1e-8, None))
 
@@ -233,8 +239,8 @@ class VonMises(ExponentialFamily):
         else:
             weights = self._normalize_weights(weights)
 
-        C = np.sum(weights * np.cos(X))
-        S = np.sum(weights * np.sin(X))
+        C = np.sum(weights * X[:,0])
+        S = np.sum(weights * X[:,1])
         loc = np.arctan2(S, C)
         R = min(np.sqrt(C * C + S * S), 0.99)
         kappa = R * (2 - R * R) / (1 - R * R)
@@ -244,7 +250,7 @@ class VonMises(ExponentialFamily):
         return loc, kappa
 
     def __repr__(self):
-        return f"VonMises(loc={self.loc:.3f}, kappa={self.kappa:.3f})"
+        return f"VonMises(loc={self.loc*180/np.pi:.1f}º, kappa={self.kappa:.3f})"
 
 
 # -------------------- Mixture Model --------------------
@@ -264,7 +270,7 @@ class MixtureModel:
             self.weights = None
             self.is_initialized = False
 
-    def _initialize(self, X:np.ndarray):
+    def _initialize(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
         labels = KMeans(n_clusters=self.n_clusters, init='k-means++', random_state=0).fit_predict(X)
         N = X.shape[0]
@@ -276,12 +282,12 @@ class MixtureModel:
 
         for j, dist in enumerate(self.components):
             if not zeros[j]:
-                dist.fit_MLE(X, weights= posteriors[:,j])
+                dist.fit_MLE(X, weights=posteriors[:, j])
             else:
                 dist.fit_MLE(X, weights=None)
 
         if np.any(zeros):
-            counts = np.maximum(counts, 0.001) # may be a problem, but let's see
+            counts = np.maximum(counts, 0.001)  # may be a problem, but let's see
         self.weights = counts / counts.sum()
 
         self.is_initialized = True
@@ -367,7 +373,7 @@ class MixtureModel:
                 comp.fit_MLE_approx(X, posterior[:, k])
 
             # ---------- Check convergence ----------
-            if it > 10 and abs(logger[-1] - logger[-2]) < tol:
+            if it > 0 and abs(logger[-1] - logger[-2]) < tol:
                 if verbose:
                     print(f"Converged at iter {it}: Delta LL={logger[-1] - logger[-2]:.3e}")
                 break
@@ -377,7 +383,7 @@ class MixtureModel:
         return logger
 
 
-def initial_priors(X:np.ndarray, n_clusters: int) -> np.ndarray:
+def initial_priors(X: np.ndarray, n_clusters: int) -> np.ndarray:
     """
     Obtain initial guess for mixture's priors using KMeans++ algorithm.
     prior_j = (1/N) * sum_i^N I{x_i in cluster_j}
