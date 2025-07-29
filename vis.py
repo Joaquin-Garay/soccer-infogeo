@@ -232,6 +232,17 @@ def add_arrow(ax, x, y, dx, dy,
 # PROBABILITY-DENSITY-FUNCTION BASED VISUALIZATION
 ######################################################
 
+colors = [
+    "#377eb8",
+    "#e41a1c",
+    "#4daf4a",
+    "#984ea3",
+    "#ff7f00",
+    "#ffff33",
+    "#a65628",
+    "#f781bf",
+    "#999999",
+]
 
 def show_direction_models_pdf(loc_models, dir_models):
     """

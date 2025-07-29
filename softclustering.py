@@ -558,6 +558,20 @@ class MixtureModel:
                 print("Reached max_iter without full convergence.")
         return logger
 
+    # ---- Performance metrics ---
+    def bic(self, X: np.ndarray):
+        X = np.asarray(X, dtype=float)
+        ll = self.log_pdf(X).sum()
+        dist_params = self.get_components()[0].get_params()
+        p = self.n_clusters - 1
+        for param in dist_params:
+            if isinstance(param, float):
+                p += 1
+            else:
+                p += param.size*self.n_clusters
+        return np.log(X.shape[0])*p - 2*ll
+
+    # ---- Display ----
     @staticmethod
     def _format_component(idx: int, w: float | None, comp) -> str:
         w_str = f"{w:0.3f}" if w is not None else "—"
