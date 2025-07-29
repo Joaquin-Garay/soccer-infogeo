@@ -8,7 +8,7 @@ from sklearn.cluster import KMeans
 # -------------------- Base --------------------
 class ExponentialFamily(ABC):
     """Abstract base for exponential-family distributions."""
-
+    # ---- Densities ----
     @abstractmethod
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
         """Return log-density log p(X)."""
@@ -17,6 +17,12 @@ class ExponentialFamily(ABC):
         """Default pdf via exp(log_pdf)."""
         return np.exp(self.log_pdf(np.asarray(X, dtype=float)))
 
+    # ---- Getters ----
+    @abstractmethod
+    def get_params(self):
+        pass
+
+    # ---- Calibration ----
     @abstractmethod
     def fit_with_mle(self, X: np.ndarray, weights: np.ndarray | None = None):
         pass
@@ -25,6 +31,7 @@ class ExponentialFamily(ABC):
     def fit_with_min_bregman(self, X: np.ndarray, weights: np.ndarray | None = None):
         pass
 
+    # ---- Utility methods ----
     @staticmethod
     def _normalize_weights(weights: np.ndarray) -> np.ndarray:
         w = np.asarray(weights, dtype=float)
@@ -76,7 +83,11 @@ class UnivariateGaussian(ExponentialFamily):
             self.mean ** 2 + self.variance
         ])
 
-    # ---- setters ----
+    # ---- Getters ----
+    def get_params(self):
+        return [self.mean, self.variance]
+
+    # ---- Setters ----
     def set_params(self, mean: float, variance: float) -> None:
         self.mean, self.variance = float(mean), float(variance)
         self._validate()
@@ -105,7 +116,7 @@ class UnivariateGaussian(ExponentialFamily):
 
     # pdf inherited from base
 
-    # ---- calibration ----
+    # ---- Calibration ----
     def fit_with_mle(self, X: np.ndarray, weights: np.ndarray | None = None) -> None:
         X, weights = self._input_process(X, weights)
         mu = np.average(X, weights=weights)
@@ -163,7 +174,10 @@ class MultivariateGaussian(ExponentialFamily):
         self._validate()
         self._cache()
 
-    # ---- getters ----
+    # ---- Getters ----
+    def get_params(self):
+        return [self.mean, self.covariance]
+
     def get_sufficient_stat(self, X: np.ndarray) -> np.ndarray:
         """
         Get the sufficient statistic vector e.g. case d=2: [x y x^2 xy yx y^2]
@@ -220,7 +234,10 @@ class MultivariateGaussian(ExponentialFamily):
         self._cache()
 
     def __repr__(self):
-        return f"MultivariateGaussian(d={self.d}, mean={self.mean}, cov={self.covariance})"
+        mean_str = np.array2string(self.mean, precision=3, separator=' ', suppress_small=True)
+        cov_rows = [np.array2string(row, precision=3, separator=' ', suppress_small=True) for row in self.covariance]
+        cov_str = '[' + ', '.join(cov_rows) + ']'
+        return f"MultivariateGaussian(d={self.d}, mean={mean_str}, cov={cov_str})"
 
 
 # -------------------- Von Mises --------------------
@@ -239,6 +256,8 @@ class VonMises(ExponentialFamily):
 
     @staticmethod
     def _mean_length(x):
+        if x <= 0:
+            x = 1e-8
         return i1e(x) / i0e(x)
 
     def _inv_mean_length(self, r, newton_steps=2):
@@ -273,7 +292,14 @@ class VonMises(ExponentialFamily):
         self.dual_param = np.array([A * np.cos(self.loc),
                                     A * np.sin(self.loc)])
 
-    # ---- setters ----
+    # ---- Getters ----
+    def get_params(self):
+        return [self.loc, self.kappa]
+
+    def get_mean_length(self):
+        return self._mean_length(self.kappa)
+
+    # ---- Setters ----
     def set_dual_params(self, eta: np.ndarray):
         self.dual_param = eta
         self.loc = np.arctan2(eta[1], eta[0])
@@ -348,7 +374,7 @@ class VonMises(ExponentialFamily):
 # -------------------- Mixture Model --------------------
 class MixtureModel:
     def __init__(self, components: list[ExponentialFamily], weights: np.ndarray | None = None):
-        self.components = components
+        self._components = components
         self.n_clusters = len(components)
         if weights is not None:
             weights = np.asarray(weights, dtype=float)
@@ -356,25 +382,28 @@ class MixtureModel:
                 raise ValueError("Components and weights mismatch.")
             if np.any(weights <= 0):
                 raise ValueError("All weights must be > 0.")
-            self.weights = weights / weights.sum()
-            self.is_initialized = True
+            self._weights = weights / weights.sum()
+            self._is_initialized = True
         else:
-            self.weights = None
-            self.is_initialized = False
+            self._weights = None
+            self._is_initialized = False
 
     def _initialize(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
-        labels = KMeans(n_clusters=self.n_clusters, init='k-means++', random_state=0).fit_predict(X)
+        labels = KMeans(n_clusters=self.n_clusters,
+                        init='k-means++',
+                        max_iter=1,
+                        random_state=0).fit_predict(X)
         N = X.shape[0]
         posteriors = np.zeros((N, self.n_clusters))
         posteriors[np.arange(N), labels] = 1.0
         # if there's an empty cluster, then uniform posterior probability
         counts = posteriors.sum(axis=0)
         zeros = counts == 0
-        #if np.any(zeros):
-        #    raise ValueError("One or more cluster at initialization have zero datamembers.")
+        if np.any(zeros):
+            raise ValueError("One or more cluster at initialization have zero datamembers.")
 
-        for j, dist in enumerate(self.components):
+        for j, dist in enumerate(self._components):
             if not zeros[j]:
                 dist.fit_with_mle(X, weights=posteriors[:, j])
             else:
@@ -382,30 +411,45 @@ class MixtureModel:
 
         if np.any(zeros):
             counts = np.maximum(counts, 0.001)  # may be a problem, but let's see
-        self.weights = counts / counts.sum()
+        self._weights = counts / counts.sum()
 
-        self.is_initialized = True
+        self._is_initialized = True
 
+    # ---- Getter ----
+    def get_weights(self):
+        return self._weights
+
+    def get_components(self):
+        return self._components
+
+    def get_posteriors(self, X: np.ndarray):
+        X = np.asarray(X, dtype=float)
+        post, _ = self._e_step(X)
+        return post
+
+    # ---- Densities ----
     def log_pdf_components(self, X: np.ndarray) -> np.ndarray:
         """
         Returns log p(x_i | k) for all i,k
         Shape: (N, K)
         """
         X = np.asarray(X, dtype=float)
-        return np.column_stack([c.log_pdf(X) for c in self.components])
+        return np.column_stack([c.log_pdf(X) for c in self._components])
 
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=float)
-        log_pi = np.log(self.weights)
+        log_pi = np.log(self._weights)
         return logsumexp(self.log_pdf_components(X) + log_pi, axis=1)
 
     def pdf(self, X):
         return np.exp(self.log_pdf(X))
 
+
+    # ---- Expectation Maximization Algorithm ----
     def _e_step(self, X):
         # E-step: Compute the posterior
         # take log to prevent underflow
-        log_prior = np.log(self.weights)  # (K,)
+        log_prior = np.log(self._weights)  # (K,)
         log_p = self.log_pdf_components(X)  # (N, K)
         log_numerator = log_prior + log_p  # (N, K)
         log_denominator = logsumexp(log_numerator, axis=1, keepdims=True)  # (N, 1)
@@ -414,11 +458,14 @@ class MixtureModel:
         log_likelihood = log_denominator.sum()
         return posterior, log_likelihood
 
-    def fit_em_classic(self, X, tol=1e-6, max_iter=200, verbose=False):
+
+    def fit_em_classic(self, X, weight = None, tol=1e-6, max_iter=200, verbose=False):
         X = np.asarray(X, dtype=float)
         N = X.shape[0]
-        if not self.is_initialized:
+        if not self._is_initialized:
             self._initialize(X)
+        if weight is None:
+            weight = np.ones(N)
         logger = []
         for it in range(max_iter):
             # E-step: Compute the posterior
@@ -427,10 +474,10 @@ class MixtureModel:
 
             # M-step: Maximize weighted log-likelihood
             # update priors
-            self.weights = posterior.sum(axis=0) / N  # effective counts (K,)
+            self._weights = np.average(posterior, axis=0, weights=weight)  # (K,)
             # update distribution parameters
-            for k, comp in enumerate(self.components):
-                comp.fit_with_mle(X, posterior[:, k])
+            for k, comp in enumerate(self._components):
+                comp.fit_with_mle(X, weight*posterior[:, k])
 
             # verbose
             if verbose:
@@ -445,11 +492,13 @@ class MixtureModel:
                 print("Reached max_iter without full convergence.")
         return logger
 
-    def fit_em_bregman(self, X, tol=1e-6, max_iter=200, verbose=False):
+    def fit_em_bregman(self, X, tol=1e-6, weight=None, max_iter=200, verbose=False):
         X = np.asarray(X, dtype=float)
         N = X.shape[0]
-        if not self.is_initialized:
+        if not self._is_initialized:
             self._initialize(X)
+        if weight is None:
+            weight = np.ones(N)
         logger = []
         for it in range(max_iter):
             # E-step: Compute the posterior
@@ -458,10 +507,10 @@ class MixtureModel:
 
             # M-step: Maximize weighted log-likelihood
             # update priors
-            self.weights = posterior.sum(axis=0) / N  # effective counts (K,)
+            self._weights = np.average(posterior, axis=0, weights=weight)  # (K,)
             # update distribution parameters
-            for k, comp in enumerate(self.components):
-                comp.fit_with_min_bregman(X, posterior[:, k])
+            for k, comp in enumerate(self._components):
+                comp.fit_with_min_bregman(X, weight*posterior[:, k])
 
             # verbose
             if verbose:
@@ -476,14 +525,16 @@ class MixtureModel:
                 print("Reached max_iter without full convergence.")
         return logger
 
-    def fit_em_vonmises_approx(self, X, tol=1e-6, max_iter=200, verbose=False):
-        if not all(isinstance(c, VonMises) for c in self.components):
+    def fit_em_vonmises_approx(self, X, weight=None, tol=1e-6, max_iter=200, verbose=False):
+        if not all(isinstance(c, VonMises) for c in self._components):
             raise TypeError("All components must be VonMises.")
 
         X = np.asarray(X, dtype=float)
         N = X.shape[0]
-        if not self.is_initialized:
+        if not self._is_initialized:
             self._initialize(X)
+        if weight is None:
+            weight = np.ones(N)
         logger = []
         for it in range(max_iter):
             # E-step: Compute the posterior
@@ -492,10 +543,10 @@ class MixtureModel:
 
             # M-step: Maximize weighted log-likelihood
             # update priors
-            self.weights = posterior.sum(axis=0) / N  # effective counts (K,)
+            self._weights = np.average(posterior, axis=0, weights=weight)  # (K,)
             # update distribution parameters
-            for k, comp in enumerate(self.components):
-                comp.fit_with_mle_proxy(X, posterior[:, k])
+            for k, comp in enumerate(self._components):
+                comp.fit_with_mle_proxy(X, weight*posterior[:, k])
 
             # ---------- Check convergence ----------
             if it > 0 and abs(logger[-1] - logger[-2]) < tol:
@@ -507,16 +558,83 @@ class MixtureModel:
                 print("Reached max_iter without full convergence.")
         return logger
 
-def initial_priors(X: np.ndarray, n_clusters: int) -> np.ndarray:
+    @staticmethod
+    def _format_component(idx: int, w: float | None, comp) -> str:
+        w_str = f"{w:0.3f}" if w is not None else "—"
+        return f"  ├─ ({idx}) w={w_str}  {comp!r}"
+
+    def __repr__(self) -> str:
+        header = f"{self.__class__.__name__}(n_clusters={self.n_clusters})"
+        if self._components is None:
+            return header + "  [no components]"
+
+        lines = [
+            self._format_component(j,
+                              None if self._weights is None else self._weights[j],
+                              comp)
+            for j, comp in enumerate(self._components)
+        ]
+        # Use a unicode corner for the last line
+        if lines:
+            lines[-1] = lines[-1].replace("├─", "└─", 1)
+        return "\n".join([header, *lines])
+
+def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_dir: int, choose="classic"):
     """
-    Obtain initial guess for mixture's priors using KMeans++ algorithm.
-    prior_j = (1/N) * sum_i^N I{x_i in cluster_j}
+    Perform a two-layers clustering scheme, starting with a K_loc-GMM, and then, for each Gaussian cluster performs a K_dir-vMMM.
+    vMMM: von Mises Mixture Model. GMM: Gaussian Mixture Model.
+    :param loc_data: Event location data. Coordinates (x,y)
+    :param dir_data: Event direction data as (Cos(alpha), Sin(alpha)
     :return:
-    (n_clusters,) np.array of prior probabilities.
     """
-    X = np.asarray(X, dtype=float)
-    labels = KMeans(n_clusters=n_clusters, init='k-means++', random_state=0).fit_predict(X)
-    counts = np.bincount(labels, minlength=n_clusters).astype(float)  # count how many of each distinct integer
-    # protect against empty clusters
-    counts = np.maximum(counts, 1e-12)
-    return counts / counts.sum()
+    dir_data = np.array(dir_data, dtype=float)
+    loc_data = np.array(loc_data, dtype=float)
+    if dir_data.shape[0] != loc_data.shape[0]:
+        raise ValueError("Sample size don't match.")
+    N = loc_data.shape[0]
+    gmm_components = [MultivariateGaussian() for _ in range(K_loc)]
+    gmm = MixtureModel(gmm_components)
+    match choose:
+        case "bregman":
+            _ = gmm.fit_em_bregman(loc_data)
+        case _:
+            _ = gmm.fit_em_classic(loc_data)
+
+    # get the posteriors of the first layer
+    posteriors = gmm.get_posteriors(loc_data)
+    vmmm_list = []
+
+    for loc_cluster in range(K_loc):
+        # first layer posterior is fixed
+        loc_posterior = posteriors[:,loc_cluster]
+        # obtain initial weights of the second layer
+        #labels = KMeans(n_clusters=K_dir,
+        #                init='k-means++',
+        #                random_state=0).fit_predict(dir_data,
+        #                                            sample_weight = loc_posterior)
+        labels = KMeans(n_clusters=K_dir,
+                        init='k-means++',
+                        max_iter=1,
+                        random_state=0).fit_predict(dir_data, sample_weight=loc_posterior)
+
+        one_hot = np.zeros((N, K_dir))
+        one_hot[np.arange(N), labels] = 1.0
+        initial_weight = one_hot.sum(axis= 0) / one_hot.sum()
+        vmmm_components = [VonMises() for _ in range(K_dir)]
+        vmmm = MixtureModel(vmmm_components, None)
+
+        match choose:
+            case "bregman":
+                _ = vmmm.fit_em_bregman(dir_data, weight=loc_posterior)
+            case "classic":
+                _ = vmmm.fit_em_classic(dir_data, weight=loc_posterior)
+            case "soccermix":
+                _ = vmmm.fit_em_vonmises_approx(dir_data, weight=loc_posterior)
+            case _:
+                raise ValueError("Invalid choice")
+        vmmm_list.append(vmmm)
+
+    return gmm, vmmm_list
+
+
+
