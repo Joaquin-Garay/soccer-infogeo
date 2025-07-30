@@ -8,6 +8,7 @@ from sklearn.cluster import KMeans
 # -------------------- Base --------------------
 class ExponentialFamily(ABC):
     """Abstract base for exponential-family distributions."""
+
     # ---- Densities ----
     @abstractmethod
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
@@ -132,7 +133,7 @@ class UnivariateGaussian(ExponentialFamily):
         X, weights = self._input_process(X, weights)
         # compute dual/expectation parameters using sufficient statistics.
         eta = np.array([np.average(X, weights=weights),
-               np.average(X ** 2, weights=weights)])
+                        np.average(X ** 2, weights=weights)])
         self.set_dual_params(eta)
 
     def __repr__(self) -> str:
@@ -188,7 +189,6 @@ class MultivariateGaussian(ExponentialFamily):
         outer = np.einsum('ij,ik->ijk', X, X)  # (N,d,d)
         return np.concatenate([X, outer.reshape(N, self.d ** 2)], axis=1)
 
-
     # ----- densities -----
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=float)
@@ -210,7 +210,7 @@ class MultivariateGaussian(ExponentialFamily):
         # Broadcasting weights to columns; (N,1) * (N,d) -> weighted rows
         weighted_diff = weights[:, np.newaxis] * diff
         cov = weighted_diff.T @ diff
-        cov += 1e-9 * np.eye(cov.shape[0]) # Numerical jitter if near-singular
+        cov += 1e-9 * np.eye(cov.shape[0])  # Numerical jitter if near-singular
 
         self.mean = mu
         self.covariance = cov
@@ -325,8 +325,8 @@ class VonMises(ExponentialFamily):
             loc, kappa = params
             if kappa <= 0:
                 return np.inf
-            #i0e(kappa) = exp(-kappa)*i0(kappa)
-            #-log(i0(kappa)) = -log(i0e(kappa)) - kappa
+            # i0e(kappa) = exp(-kappa)*i0(kappa)
+            # -log(i0(kappa)) = -log(i0e(kappa)) - kappa
             ll = np.sum(weights * (kappa * (np.cos(loc) * X[:, 0] \
                                             + np.sin(loc) * X[:, 1]) \
                                    - np.log(i0e(kappa)) - kappa - const))
@@ -444,7 +444,6 @@ class MixtureModel:
     def pdf(self, X):
         return np.exp(self.log_pdf(X))
 
-
     # ---- Expectation Maximization Algorithm ----
     def _e_step(self, X):
         # E-step: Compute the posterior
@@ -458,8 +457,7 @@ class MixtureModel:
         log_likelihood = log_denominator.sum()
         return posterior, log_likelihood
 
-
-    def fit_em_classic(self, X, weight = None, tol=1e-6, max_iter=200, verbose=False):
+    def fit_em_classic(self, X, weight=None, tol=1e-6, max_iter=200, verbose=False):
         X = np.asarray(X, dtype=float)
         N = X.shape[0]
         if not self._is_initialized:
@@ -477,7 +475,7 @@ class MixtureModel:
             self._weights = np.average(posterior, axis=0, weights=weight)  # (K,)
             # update distribution parameters
             for k, comp in enumerate(self._components):
-                comp.fit_with_mle(X, weight*posterior[:, k])
+                comp.fit_with_mle(X, weight * posterior[:, k])
 
             # verbose
             if verbose:
@@ -510,7 +508,7 @@ class MixtureModel:
             self._weights = np.average(posterior, axis=0, weights=weight)  # (K,)
             # update distribution parameters
             for k, comp in enumerate(self._components):
-                comp.fit_with_min_bregman(X, weight*posterior[:, k])
+                comp.fit_with_min_bregman(X, weight * posterior[:, k])
 
             # verbose
             if verbose:
@@ -546,7 +544,7 @@ class MixtureModel:
             self._weights = np.average(posterior, axis=0, weights=weight)  # (K,)
             # update distribution parameters
             for k, comp in enumerate(self._components):
-                comp.fit_with_mle_proxy(X, weight*posterior[:, k])
+                comp.fit_with_mle_proxy(X, weight * posterior[:, k])
 
             # ---------- Check convergence ----------
             if it > 0 and abs(logger[-1] - logger[-2]) < tol:
@@ -568,8 +566,20 @@ class MixtureModel:
             if isinstance(param, float):
                 p += 1
             else:
-                p += param.size*self.n_clusters
-        return np.log(X.shape[0])*p - 2*ll
+                p += param.size * self.n_clusters
+        return np.log(X.shape[0]) * p - 2 * ll
+
+    def aic(self, X: np.ndarray):
+        X = np.asarray(X, dtype=float)
+        ll = self.log_pdf(X).sum()
+        dist_params = self.get_components()[0].get_params()
+        p = self.n_clusters - 1
+        for param in dist_params:
+            if isinstance(param, float):
+                p += 1
+            else:
+                p += param.size * self.n_clusters
+        return 2 * p - 2 * ll
 
     # ---- Display ----
     @staticmethod
@@ -584,14 +594,15 @@ class MixtureModel:
 
         lines = [
             self._format_component(j,
-                              None if self._weights is None else self._weights[j],
-                              comp)
+                                   None if self._weights is None else self._weights[j],
+                                   comp)
             for j, comp in enumerate(self._components)
         ]
         # Use a unicode corner for the last line
         if lines:
             lines[-1] = lines[-1].replace("├─", "└─", 1)
         return "\n".join([header, *lines])
+
 
 def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_dir: int, choose="classic"):
     """
@@ -620,9 +631,9 @@ def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_d
 
     for loc_cluster in range(K_loc):
         # first layer posterior is fixed
-        loc_posterior = posteriors[:,loc_cluster]
+        loc_posterior = posteriors[:, loc_cluster]
         # obtain initial weights of the second layer
-        #labels = KMeans(n_clusters=K_dir,
+        # labels = KMeans(n_clusters=K_dir,
         #                init='k-means++',
         #                random_state=0).fit_predict(dir_data,
         #                                            sample_weight = loc_posterior)
@@ -633,7 +644,7 @@ def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_d
 
         one_hot = np.zeros((N, K_dir))
         one_hot[np.arange(N), labels] = 1.0
-        initial_weight = one_hot.sum(axis= 0) / one_hot.sum()
+        initial_weight = one_hot.sum(axis=0) / one_hot.sum()
         vmmm_components = [VonMises() for _ in range(K_dir)]
         vmmm = MixtureModel(vmmm_components, None)
 
@@ -649,6 +660,3 @@ def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_d
         vmmm_list.append(vmmm)
 
     return gmm, vmmm_list
-
-
-
