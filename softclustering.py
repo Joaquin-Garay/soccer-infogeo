@@ -1,8 +1,10 @@
 import numpy as np
 from abc import ABC, abstractmethod
-from scipy.optimize import minimize
+from scipy.optimize import minimize, bisect
 from scipy.special import i0e, i1e, logsumexp
+from scipy.linalg import cho_solve, solve_triangular
 from sklearn.cluster import KMeans
+from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
 
 
 # -------------------- Base --------------------
@@ -169,12 +171,6 @@ class MultivariateGaussian(ExponentialFamily):
             raise ValueError("Covariance must be positive-definite.") from e
         self._log_det = 2 * np.sum(np.log(np.diag(self._chol)))
 
-    def set_params(self, mean: np.ndarray, covariance: np.ndarray) -> None:
-        self.mean = np.asarray(mean, dtype=float)
-        self.covariance = np.asarray(covariance, dtype=float)
-        self._validate()
-        self._cache()
-
     # ---- Getters ----
     def get_params(self):
         return [self.mean, self.covariance]
@@ -189,6 +185,13 @@ class MultivariateGaussian(ExponentialFamily):
         outer = np.einsum('ij,ik->ijk', X, X)  # (N,d,d)
         return np.concatenate([X, outer.reshape(N, self.d ** 2)], axis=1)
 
+    # --- Setters ---
+    def set_params(self, mean: np.ndarray, covariance: np.ndarray) -> None:
+        self.mean = np.asarray(mean, dtype=float)
+        self.covariance = np.asarray(covariance, dtype=float)
+        self._validate()
+        self._cache()
+
     # ----- densities -----
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=float)
@@ -201,6 +204,42 @@ class MultivariateGaussian(ExponentialFamily):
         return -0.5 * (self.d * np.log(2 * np.pi) + self._log_det + quad)
 
     # pdf inherited from base
+
+    @staticmethod
+    def divergence(mean_1, cov_1, mean_2, cov_2):
+        """
+        Obtain the canonical Bregman divergence between two Multivariate Gaussian distributions.
+        Computed via log-partition Bregman divergence
+        D = psi(theta_1) - psi(theta_2) - inner(nabla psi(theta_2), theta_1 - theta_2)
+        """
+        try:
+            chol_1 = np.linalg.cholesky(cov_1)
+            chol_2 = np.linalg.cholesky(cov_2)
+        except np.linalg.LinAlgError as e:
+            raise ValueError("Covariance must be positive-definite.") from e
+
+        d = mean_1.shape[0]
+        log_det_1 = 2 * np.sum(np.log(np.diag(chol_1)))
+        log_det_2 = 2 * np.sum(np.log(np.diag(chol_2)))
+
+        # Compute Sigma^{-1}
+        inv_cov_1 = cho_solve((chol_1, True), np.eye(d))
+        inv_cov_2 = cho_solve((chol_2, True), np.eye(d))
+
+        # Compute Sigma^{-1} * mu
+        alpha_1 = cho_solve((chol_1, True), mean_1)
+        alpha_2 = cho_solve((chol_2, True), mean_2)
+
+        # Compute mu^T * Sigma^{-1} * mu
+        beta_1 = np.inner(mean_1, alpha_1)
+        beta_2 = np.inner(mean_2, alpha_2)
+
+        psi_1 = 0.5 * (d * np.log(2 * np.pi) + log_det_1 + beta_1)
+        psi_2 = 0.5 * (d * np.log(2 * np.pi) + log_det_2 + beta_2)
+        inner = np.inner(mean_2, alpha_1 - alpha_2)
+        inner -= 0.5 * np.sum((cov_2 + np.outer(mean_2, mean_2)) * (inv_cov_1 - inv_cov_2))
+
+        return psi_1 - psi_2 - inner
 
     # ----- Calibration -----
     def fit_with_mle(self, X: np.ndarray, weights: np.ndarray | None = None) -> None:
@@ -256,30 +295,20 @@ class VonMises(ExponentialFamily):
 
     @staticmethod
     def _mean_length(x):
-        if x <= 0:
-            x = 1e-8
+        x = np.clip(x, 1e-6, 100)
         return i1e(x) / i0e(x)
 
-    def _inv_mean_length(self, r, newton_steps=2):
-        def initial_guess(r):
-            if r < 0.53:
-                return 2 * r + r ** 3 + 5 * r ** 5 / 6
-            elif r < 0.85:
-                return -0.4 + 1.39 * r + 0.43 / (1 - r)
+    def _inv_mean_length(self, r):
+        # initial guess
+        def initial_guess(x):
+            if x < 0.53:
+                return 2 * x + x ** 3 + (5 * x ** 5) / 6
+            elif x < 0.85:
+                return -0.4 + 1.39 * x + 0.43 / (1 - x)
             else:
-                return 1 / (r ** 3 - 4 * r ** 2 + 3 * r)
+                return 1 / (x ** 3 - 4 * x ** 2 + 3 * x)
 
-        # 1) initial guess
-        k = initial_guess(r)
-        # 2) Newton refine
-        for _ in range(newton_steps):
-            Ak = self._mean_length(k)
-            # derivative A'(k)
-            dAk = 1 - Ak ** 2 - Ak / k
-            k -= (Ak - r) / dAk
-            if k <= 0:
-                k = 1e-8
-        return k
+        return initial_guess(r)
 
     def _validate(self):
         if self.kappa <= 0:
@@ -288,13 +317,16 @@ class VonMises(ExponentialFamily):
     def _update_params(self):
         self.natural_param = np.array([self.kappa * np.cos(self.loc),
                                        self.kappa * np.sin(self.loc)])
-        A = self._mean_length(self.kappa)
-        self.dual_param = np.array([A * np.cos(self.loc),
-                                    A * np.sin(self.loc)])
+        self.A = self._mean_length(self.kappa)
+        self.dual_param = np.array([self.A * np.cos(self.loc),
+                                    self.A * np.sin(self.loc)])
 
     # ---- Getters ----
     def get_params(self):
         return [self.loc, self.kappa]
+
+    def get_natural_params(self):
+        return self.natural_param
 
     def get_mean_length(self):
         return self._mean_length(self.kappa)
@@ -303,7 +335,8 @@ class VonMises(ExponentialFamily):
     def set_dual_params(self, eta: np.ndarray):
         self.dual_param = eta
         self.loc = np.arctan2(eta[1], eta[0])
-        self.kappa = self._inv_mean_length(np.linalg.norm(eta))
+        self.A = np.minimum(np.linalg.norm(eta), 0.9948)
+        self.kappa = self._inv_mean_length(self.A)
         self._validate()
         self.natural_param = np.array([self.kappa * np.cos(self.loc),
                                        self.kappa * np.sin(self.loc)])
@@ -409,8 +442,6 @@ class MixtureModel:
             else:
                 dist.fit_with_mle(X, weights=None)
 
-        if np.any(zeros):
-            counts = np.maximum(counts, 0.001)  # may be a problem, but let's see
         self._weights = counts / counts.sum()
 
         self._is_initialized = True
@@ -580,6 +611,24 @@ class MixtureModel:
             else:
                 p += param.size * self.n_clusters
         return 2 * p - 2 * ll
+
+    def hard_predict(self, X: np.ndarray):
+        X = np.asarray(X, dtype=float)
+        posteriors, _ = self._e_step(X)
+        labels = np.argmax(posteriors, axis=1)
+        return labels
+
+    def ch_score(self, X):
+        X = np.asarray(X, dtype=float)
+        return calinski_harabasz_score(X, self.hard_predict(X))
+
+    def dv_score(self, X):
+        X = np.asarray(X, dtype=float)
+        return davies_bouldin_score(X, self.hard_predict(X))
+
+    def silhouette_score(self, X):
+        X = np.asarray(X, dtype=float)
+        return silhouette_score(X, self.hard_predict(X))
 
     # ---- Display ----
     @staticmethod
