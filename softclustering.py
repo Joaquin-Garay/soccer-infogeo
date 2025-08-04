@@ -20,9 +20,17 @@ class ExponentialFamily(ABC):
         """Default pdf via exp(log_pdf)."""
         return np.exp(self.log_pdf(np.asarray(X, dtype=float)))
 
-    # ---- Getters ----
+    # ---- Getters and Setter ----
+    @property
     @abstractmethod
-    def get_params(self):
+    def params(self):
+        """ Get parameters in the ordinary form."""
+        pass
+
+    @property
+    @abstractmethod
+    def dual_param(self):
+        """ Get dual parameter vector. Mean of sufficient statistc vector."""
         pass
 
     # ---- Calibration ----
@@ -55,67 +63,86 @@ class ExponentialFamily(ABC):
 class UnivariateGaussian(ExponentialFamily):
     """
     N(mean, variance) in natural form:
-        θ = ( -μ/σ² , -1/(2σ²) )
+        theta = ( -mu/sigma^2, -1/(2*sigma^2) )
     dual / mean-value form:
-        η = ( μ , μ² + σ² )
+        eta =   ( mu , mu^2 + sigma^2 )
     """
 
     def __init__(self, mean: float = 0.0, variance: float = 1.0):
-        self.mean = float(mean)
-        self.variance = float(variance)
-        self.natural_param = None
-        self.dual_param = None
+        self._mean = float(mean)
+        self._variance = float(variance)
+        self._natural_param = None
+        self._dual_param = None
         self._validate()
         self._update_params()
 
     def _validate(self) -> None:
-        if self.variance <= 0:
+        if self._variance <= 0:
             raise ValueError("variance must be > 0.")
-        if self.natural_param is not None and self.natural_param[1] >= 0:
+        if self._natural_param is not None and self._natural_param[1] >= 0:
             raise ValueError("Second natural parameter must be negative.")
-        if self.dual_param is not None and self.dual_param[1] <= self.dual_param[0] ** 2:
+        if self._dual_param is not None and self._dual_param[1] <= self._dual_param[0] ** 2:
             raise ValueError("eta2 - eta1^2 must be > 0.")
 
     def _update_params(self) -> None:
-        self.natural_param = np.array([
-            -self.mean / self.variance,
-            -1.0 / (2.0 * self.variance)
+        self._natural_param = np.array([
+            -self._mean / self._variance,
+            -1.0 / (2.0 * self._variance)
         ])
-        self.dual_param = np.array([
-            self.mean,
-            self.mean ** 2 + self.variance
+        self._dual_param = np.array([
+            self._mean,
+            self._mean ** 2 + self._variance
         ])
 
-    # ---- Getters ----
-    def get_params(self):
-        return [self.mean, self.variance]
+    # ---- Getters and Setters ----
+    @property
+    def params(self) -> np.ndarray:
+        return np.array([self._mean, self._variance]).copy()
 
-    # ---- Setters ----
-    def set_params(self, mean: float, variance: float) -> None:
-        self.mean, self.variance = float(mean), float(variance)
+    @params.setter
+    def params(self, mean: float, variance: float):
+        self._mean, self._variance = float(mean), float(variance)
         self._validate()
         self._update_params()
 
-    def set_natural_params(self, theta: np.ndarray) -> None:
+    @property
+    def natural_param(self):
+        return self._natural_param.copy()
+
+    @natural_param.setter
+    def natural_param(self, theta: np.ndarray):
         theta = np.asarray(theta, dtype=float)
-        self.natural_param = theta
-        self.mean = -0.5 * theta[0] / theta[1]
-        self.variance = -0.5 / theta[1]
+        if theta.shape != (2,):
+            raise ValueError("natural_param must be a length-2 vector.")
+        self._natural_param = theta
+        self._mean = -0.5 * theta[0] / theta[1]
+        self._variance = -0.5 / theta[1]
         self._validate()
         self._update_params()
 
-    def set_dual_params(self, eta: np.ndarray) -> None:
+    @property
+    def dual_param(self):
+        return self._dual_param.copy()
+
+    @dual_param.setter
+    def dual_param(self, eta: np.ndarray) -> None:
         eta = np.asarray(eta, dtype=float)
-        self.dual_param = eta
-        self.mean = eta[0]
-        self.variance = eta[1] - eta[0] ** 2
+        if eta.shape != (2,):
+            raise ValueError("dual_param must be a length-2 vector.")
+        self._dual_param = eta
+        self._mean = eta[0]
+        self._variance = eta[1] - eta[0] ** 2
         self._validate()
         self._update_params()
+
+    @staticmethod
+    def from_dual_to_ordinary(eta: np.ndarray) -> list[float]:
+        return [float(eta[0]), float(eta[1] - eta[0] ** 2)]
 
     # ---- densities ----
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=float)
-        return -0.5 * ((X - self.mean) ** 2) / self.variance - 0.5 * np.log(2 * np.pi * self.variance)
+        return -0.5 * ((X - self._mean) ** 2) / self._variance - 0.5 * np.log(2 * np.pi * self._variance)
 
     # pdf inherited from base
 
@@ -132,10 +159,10 @@ class UnivariateGaussian(ExponentialFamily):
         X, weights = self._input_process(X, weights)
         mu = np.average(X, weights=weights)
         diff = X - mu
-        variance = np.dot(weights * diff, diff)
+        variance = np.inner(weights * diff, diff)
 
-        self.mean = mu
-        self.variance = variance
+        self._mean = mu
+        self._variance = variance
         self._validate()
         self._update_params()
 
@@ -144,66 +171,124 @@ class UnivariateGaussian(ExponentialFamily):
         # compute dual/expectation parameters using sufficient statistics.
         eta = np.array([np.average(X, weights=weights),
                         np.average(X ** 2, weights=weights)])
-        self.set_dual_params(eta)
+        self.dual_param = eta
 
     def __repr__(self) -> str:
-        return f"UnivariateGaussian(mean={self.mean:.3f}, variance={self.variance:.3f})"
+        return f"UnivariateGaussian(mean={self._mean:.3f}, variance={self._variance:.3f})"
 
 
 # -------------------- Multivariate Gaussian --------------------
 class MultivariateGaussian(ExponentialFamily):
     def __init__(self, mean: np.ndarray | None = None, covariance: np.ndarray | None = None):
         super().__init__()
-        self.mean = np.zeros(2) if mean is None else np.asarray(mean, dtype=float)
-        self.covariance = np.eye(self.mean.size) if covariance is None else np.asarray(covariance, dtype=float)
+        self._mean = np.zeros(2) if mean is None else np.asarray(mean, dtype=float)
+        self._covariance = np.eye(self._mean.size) if covariance is None else np.asarray(covariance, dtype=float)
         self._validate()
         self._cache()
 
-    @property
-    def d(self) -> int:
-        return self.mean.size
-
-    def _validate(self) -> None:
-        if self.covariance.shape[0] != self.covariance.shape[1]:
+    def _validate(self):
+        if self._covariance.shape[0] != self._covariance.shape[1]:
             raise ValueError("Covariance matrix must be square.")
-        if self.mean.shape[0] != self.covariance.shape[0]:
+        if self._mean.shape[0] != self._covariance.shape[0]:
             raise ValueError("Mean and covariance shapes mismatch.")
-        if not np.allclose(self.covariance, self.covariance.T):
+        if not np.allclose(self._covariance, self._covariance.T):
             raise ValueError("Covariance must be symmetric.")
         # Positive definiteness checked in _cache via Cholesky
 
-    def _cache(self) -> None:
+    def _cache(self):
         try:
-            self._chol = np.linalg.cholesky(self.covariance)
+            self._chol = np.linalg.cholesky(self._covariance)
         except np.linalg.LinAlgError as e:
             raise ValueError("Covariance must be positive-definite.") from e
         self._log_det = 2 * np.sum(np.log(np.diag(self._chol)))
 
-    # ---- Getters ----
-    def get_params(self):
-        return [self.mean, self.covariance]
+    # ---- Getters and Setter ----
+    @property
+    def d(self) -> int:
+        return self._mean.size
 
-    def get_sufficient_stat(self, X: np.ndarray) -> np.ndarray:
+    @property
+    def params(self):
+        return [self._mean, self._covariance]
+
+    @params.setter
+    def params(self, value):
+        mean, covariance = value
+        self._mean = np.asarray(mean, dtype=float)
+        self._covariance = np.asarray(covariance, dtype=float)
+        self._validate()
+        self._cache()
+
+    @property
+    def natural_param(self):
+        theta_1 = np.linalg.solve(self._covariance, self._mean)
+        theta_2 = -0.5 * np.linalg.inv(self._covariance)
+        return np.concatenate([theta_1, theta_2.ravel()])
+
+    @natural_param.setter
+    def natural_param(self, theta: np.ndarray):
+        pass
+
+    @property
+    def dual_param(self):
+        mu = self._mean
+        second_moment = (self._covariance + np.outer(mu, mu)).flatten()
+        return np.concatenate([mu, second_moment.ravel()])
+
+    @dual_param.setter
+    def dual_param(self, eta: np.ndarray):
+        d = self.d
+        mu = eta[:d]  # E[x]
+        second_moments = eta[d:].reshape((d, d))  # E[x x^T]
+        cov = second_moments - np.outer(mu, mu)  # covariance = E[x x^T] – mu mu^T
+        cov += 1e-9 * np.eye(cov.shape[0])  # Numerical jitter if near-singular
+        self._mean, self._covariance = mu, cov
+
+    @staticmethod
+    def get_sufficient_stat(X: np.ndarray) -> np.ndarray:
         """
         Get the sufficient statistic vector e.g. case d=2: [x y x^2 xy yx y^2]
         :param X:
         :return: array (N,d+d^2)
         """
         N = X.shape[0]
+        d = X.shape[1]
         outer = np.einsum('ij,ik->ijk', X, X)  # (N,d,d)
-        return np.concatenate([X, outer.reshape(N, self.d ** 2)], axis=1)
+        return np.concatenate([X, outer.reshape(N, d ** 2)], axis=1)
 
-    # --- Setters ---
-    def set_params(self, mean: np.ndarray, covariance: np.ndarray) -> None:
-        self.mean = np.asarray(mean, dtype=float)
-        self.covariance = np.asarray(covariance, dtype=float)
-        self._validate()
-        self._cache()
+    @staticmethod
+    def from_dual_to_ordinary(eta: np.ndarray) -> list[np.ndarray]:
+        """
+        Vectorized conversion from dual parameters to (mean, covariance).
+        Returns:
+            mu: array of shape (n, d)
+            cov: array of shape (n, d, d)
+        """
+        eta = np.asarray(eta, dtype=float)
+        if eta.ndim == 1:
+            eta = eta[None, :]  # promote single vector to batch
+
+        n, L = eta.shape
+        # solve d from L = d + d^2  => d = (-1 + sqrt(1+4L)) / 2
+        d = int(-0.5 + 0.5 * np.sqrt(1 + 4 * L))
+        if d + d * d != L:
+            raise ValueError(f"Invalid eta length {L}; cannot infer integer d.")
+
+        mu = eta[:, :d]  # (n, d)
+        second_moments = eta[:, d:].reshape(n, d, d)  # (n, d, d)
+        # covariance = E[xx^T] - mu mu^T, broadcasting outer product
+        cov = second_moments - mu[:, :, None] * mu[:, None, :]  # (n, d, d)
+        cov = cov + 1e-9 * np.eye(d)
+
+        # if original input was 1D, unwrap outputs
+        if cov.shape[0] == 1:
+            return [mu[0], cov[0]]
+        return [mu, cov]
 
     # ----- densities -----
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=float)
-        diff = X - self.mean  # (d,) or (N,d)
+        diff = X - self._mean  # (d,) or (N,d)
         if diff.ndim == 1:  # single data point
             diff = diff[np.newaxis, :]  # (1,d)
         # Solve L y = diff^T => y = L^{-1} diff^T
@@ -219,14 +304,13 @@ class MultivariateGaussian(ExponentialFamily):
         Compute the KL divergence of a Multivariate Gaussian distribution.
         KL[N(mu, Sigma) : N(mu0, Sigma0)] = D_phi[eta : eta_0]
         """
-        try:
-            chol = np.linalg.cholesky(cov)
-            chol_0 = np.linalg.cholesky(cov_0)
-        except np.linalg.LinAlgError as e:
-            raise ValueError("Covariance must be positive-definite.") from e
-
         d = mean.shape[0]
-        diff =  mean - mean_0
+        diff = mean - mean_0
+
+        if np.linalg.det(cov) <= 1e-9:
+            cov += 1e-9 * np.eye(cov.shape[0])
+        if np.linalg.det(cov_0) <= 1e-9:
+            cov_0 += 1e-9 * np.eye(cov_0.shape[0])
 
         # quadratic term
         solve_diff = np.linalg.solve(cov_0, diff)
@@ -237,8 +321,8 @@ class MultivariateGaussian(ExponentialFamily):
         trace_term = np.trace(solve_trace)
 
         # log determinants
-        log_det = 2 * np.sum(np.log(np.diag(chol)))
-        log_det_0 = 2 * np.sum(np.log(np.diag(chol_0)))
+        log_det = np.log(np.linalg.det(cov))
+        log_det_0 = np.log(np.linalg.det(cov_0))
 
         return 0.5 * (log_det_0 - log_det + quadratic_term + trace_term - d)
 
@@ -252,30 +336,24 @@ class MultivariateGaussian(ExponentialFamily):
         cov = weighted_diff.T @ diff
         cov += 1e-9 * np.eye(cov.shape[0])  # Numerical jitter if near-singular
 
-        self.mean = mu
-        self.covariance = cov
+        self._mean = mu
+        self._covariance = cov
         self._validate()
         self._cache()
 
     def fit_with_min_bregman(self, X: np.ndarray, weights: np.ndarray | None = None) -> None:
         X, weights = self._input_process(X, weights)  # normalizes weights
-        d = self.d
         # form sufficient stats and average
         suf_stat = self.get_sufficient_stat(X)  # shape (N, d + d^2)
         dual = np.average(suf_stat, axis=0, weights=weights)  # length d + d^2
         # update params
-        mu = dual[:d]  # E[x]
-        second_moments = dual[d:].reshape((d, d))  # E[x x^T]
-        cov = second_moments - np.outer(mu, mu)  # covariance = E[x x^T] – mu mu^T
-        cov += 1e-9 * np.eye(cov.shape[0])  # Numerical jitter if near-singular
-        self.mean = mu
-        self.covariance = cov
+        self.dual_param = dual
         self._validate()
         self._cache()
 
     def __repr__(self):
-        mean_str = np.array2string(self.mean, precision=3, separator=' ', suppress_small=True)
-        cov_rows = [np.array2string(row, precision=3, separator=' ', suppress_small=True) for row in self.covariance]
+        mean_str = np.array2string(self._mean, precision=3, separator=' ', suppress_small=True)
+        cov_rows = [np.array2string(row, precision=3, separator=' ', suppress_small=True) for row in self._covariance]
         cov_str = '[' + ', '.join(cov_rows) + ']'
         return f"MultivariateGaussian(d={self.d}, mean={mean_str}, cov={cov_str})"
 
@@ -289,71 +367,156 @@ class VonMises(ExponentialFamily):
 
     def __init__(self, loc=0.0, kappa=0.01):
         super().__init__()
-        self.loc = float(loc)
-        self.kappa = float(kappa)
+        self._loc = float(loc)
+        self._kappa = float(kappa)
+        self._natural_param = None
+        self._dual_param = None
+        self._A = None
         self._validate()
         self._update_params()
 
     @staticmethod
-    def _mean_length(x):
-        x = np.clip(x, 1e-6, 100)
-        return i1e(x) / i0e(x)
+    def _mean_length(kappa):
+        kappa = np.clip(kappa, 1e-6, 100.0)
+        return i1e(kappa) / i0e(kappa)
 
-    def _inv_mean_length(self, r):
-        # initial guess
-        def initial_guess(x):
-            if x < 0.53:
-                return 2 * x + x ** 3 + (5 * x ** 5) / 6
-            elif x < 0.85:
-                return -0.4 + 1.39 * x + 0.43 / (1 - x)
-            else:
-                return 1 / (x ** 3 - 4 * x ** 2 + 3 * x)
-
-        return initial_guess(r)
+    @staticmethod
+    def _inv_mean_length(r: float):
+        """
+        A^{-1} approximation given by Best and Fisher (1981).
+        :param r:
+        :return:
+        """
+        if r < 0.53:
+            return 2 * r + r ** 3 + (5 * r ** 5) / 6
+        elif r < 0.85:
+            return -0.4 + 1.39 * r + 0.43 / (1 - r)
+        else:
+            return 1 / (r ** 3 - 4 * r ** 2 + 3 * r)
 
     def _validate(self):
-        if self.kappa <= 0:
+        if self._kappa <= 0:
             raise ValueError("Concentration parameter kappa must be positive.")
 
     def _update_params(self):
-        self.natural_param = np.array([self.kappa * np.cos(self.loc),
-                                       self.kappa * np.sin(self.loc)])
-        self.A = self._mean_length(self.kappa)
-        self.dual_param = np.array([self.A * np.cos(self.loc),
-                                    self.A * np.sin(self.loc)])
+        self._natural_param = np.array([self._kappa * np.cos(self._loc),
+                                        self._kappa * np.sin(self._loc)])
+        self._A = self._mean_length(self._kappa)
+        self._dual_param = np.array([self._A * np.cos(self._loc),
+                                     self._A * np.sin(self._loc)])
 
-    # ---- Getters ----
-    def get_params(self):
-        return [self.loc, self.kappa]
+    # ---- Getters and Setters ----
+    @property
+    def loc(self):
+        return self._loc
 
-    def get_natural_params(self):
-        return self.natural_param
+    @loc.setter
+    def loc(self, value):
+        self._loc = float(value)
+        self._update_params()
 
-    def get_mean_length(self):
-        return self._mean_length(self.kappa)
+    @property
+    def kappa(self):
+        return self._kappa
 
-    # ---- Setters ----
-    def set_dual_params(self, eta: np.ndarray):
-        self.dual_param = eta
-        self.loc = np.arctan2(eta[1], eta[0])
-        self.A = np.minimum(np.linalg.norm(eta), 0.9948)
-        self.kappa = self._inv_mean_length(self.A)
+    @kappa.setter
+    def kappa(self, value):
+        self._kappa = value
         self._validate()
-        self.natural_param = np.array([self.kappa * np.cos(self.loc),
-                                       self.kappa * np.sin(self.loc)])
+        self._update_params()
+
+    @property
+    def params(self):
+        return np.array([self._loc, self._kappa]).copy()
+
+    @property
+    def mean_length(self):
+        return self._A
+
+    @property
+    def natural_param(self):
+        return self._natural_param.copy()
+
+    @natural_param.setter
+    def natural_param(self, theta: np.ndarray):
+        theta = np.asarray(theta, dtype=float)
+        if theta.shape != (2,):
+            raise ValueError("natural_param must be a length-2 vector.")
+        self._natural_param = theta
+        self._loc = np.arctan2(theta[1], theta[0])
+        # A(kappa=100) = 0.9948
+        self._kappa = np.minimum(np.linalg.norm(theta), 100.0)
+        self._A = self._mean_length(self._kappa)
+        self._validate()
+        self._dual_param = np.array([self._A * np.cos(self._loc),
+                                     self._A * np.sin(self._loc)])
+
+    @property
+    def dual_param(self):
+        return self._dual_param.copy()
+
+    @dual_param.setter
+    def dual_param(self, eta: np.ndarray):
+        eta = np.asarray(eta, dtype=float)
+        if eta.shape != (2,):
+            raise ValueError("dual_param must be a length-2 vector.")
+        self._dual_param = eta
+        self._loc = np.arctan2(eta[1], eta[0])
+        # A(kappa=100) = 0.9948
+        self._A = np.minimum(np.linalg.norm(eta), 0.9948)
+        self._kappa = self._inv_mean_length(self._A)
+        self._validate()
+        self._natural_param = np.array([self._kappa * np.cos(self._loc),
+                                        self._kappa * np.sin(self._loc)])
+
+    @staticmethod
+    def get_sufficient_stat(X: np.ndarray):
+        return X
+
+    @staticmethod
+    def from_dual_to_ordinary(eta: np.ndarray) -> list[np.ndarray]:
+        """
+        Convert dual params eta = [eta1, eta2] to (loc, kappa) for one or many etas.
+        If eta has shape (2,), returns array([loc, kappa]).
+        If eta has shape (n,2), returns shape (n,2) with each row [loc, kappa].
+        """
+        eta = np.asarray(eta, float)
+        single = (eta.ndim == 1)
+        if single:
+            eta = eta[np.newaxis, :]
+
+        loc = np.arctan2(eta[:, 1], eta[:, 0])  # shape (n,)
+        A = np.minimum(np.linalg.norm(eta, axis=1), 0.9948)
+
+        # vectorized Best–Fisher inversion:
+        #   if A<0.53: 2A + A^3 + 5A^5/6
+        #   elif A<0.85: -0.4 + 1.39A + 0.43/(1−A)
+        #   else: 1/(A^3 − 4A^2 + 3A)
+        kappa = np.where(
+            A < 0.53,
+            2 * A + A ** 3 + (5 * A ** 5) / 6,
+            np.where(
+                A < 0.85,
+                -0.4 + 1.39 * A + 0.43 / (1 - A),
+                1.0 / (A ** 3 - 4 * A ** 2 + 3 * A)
+            )
+        )
+
+        out = [loc, kappa]  # shape (n,2)
+        return [loc[0], kappa[0]] if single else out
 
     # ----- densities -----
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=float)
-        log_partition = np.log(2 * np.pi * i0e(self.kappa)) + self.kappa
-        return X @ self.natural_param - log_partition
+        log_partition = np.log(2 * np.pi * i0e(self._kappa)) + self._kappa
+        return X @ self._natural_param - log_partition
 
     # pdf inherited from base
 
     @staticmethod
     def kl_div(loc, kappa, loc_0, kappa_0):
         """
-        Compute the KL divergence of a von Mises distribution.
+        Compute the KL divergence of a von Mises distribution using ordinary coordinate system.
         KL[vM(loc, kappa) : vM(loc0, kappa0)] = D_phi[eta : eta_0]
         """
         log_term = np.log(i0e(kappa_0) / i0e(kappa)) + kappa_0 - kappa
@@ -387,7 +550,7 @@ class VonMises(ExponentialFamily):
             method="L-BFGS-B",
             bounds=bnds
         )
-        self.loc, self.kappa = result.x
+        self._loc, self._kappa = result.x
         self._update_params()
         return result
 
@@ -400,7 +563,7 @@ class VonMises(ExponentialFamily):
         R = min(np.sqrt(C * C + S * S), 0.99)
         kappa = R * (2 - R * R) / (1 - R * R)
 
-        self.loc, self.kappa = loc, kappa
+        self._loc, self._kappa = loc, kappa
         self._update_params()
         return loc, kappa
 
@@ -409,10 +572,10 @@ class VonMises(ExponentialFamily):
 
         # compute dual/expectation parameters using sufficient statistics.
         eta = np.average(X, axis=0, weights=weights)
-        self.set_dual_params(eta)
+        self.dual_param = eta
 
     def __repr__(self):
-        return f"VonMises(loc={self.loc * 180 / np.pi:.1f}º, kappa={self.kappa:.3f})"
+        return f"VonMises(loc={self._loc * 180 / np.pi:.1f}º, kappa={self._kappa:.3f})"
 
 
 # -------------------- Mixture Model --------------------
@@ -602,7 +765,7 @@ class MixtureModel:
     def bic(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
         ll = self.log_pdf(X).sum()
-        dist_params = self.get_components()[0].get_params()
+        dist_params = self.get_components()[0].params
         p = self.n_clusters - 1
         for param in dist_params:
             if isinstance(param, float):
@@ -614,7 +777,7 @@ class MixtureModel:
     def aic(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
         ll = self.log_pdf(X).sum()
-        dist_params = self.get_components()[0].get_params()
+        dist_params = self.get_components()[0].params
         p = self.n_clusters - 1
         for param in dist_params:
             if isinstance(param, float):
@@ -629,17 +792,40 @@ class MixtureModel:
         labels = np.argmax(posteriors, axis=1)
         return labels
 
-    def ch_score(self, X):
+    def kl_ch_score(self, X):
+        """
+        Compute the Calinski–Harabasz score but instead of Euclidean distance,
+        use KL divergences.
+        CH = between-cluster separation (BC) / within-cluster dispersion (WC)
+        BC = sum_j^K prior_j * KL[eta_j : centroid]
+        WC = sum_j^K sum_i^N posterior_{ij} * KL[x_i : eta_j]
+        """
+        # precompute functions and values
         X = np.asarray(X, dtype=float)
-        return calinski_harabasz_score(X, self.hard_predict(X))
+        N = X.shape[0]
+        K = self.n_clusters
+        KL = self.get_components()[0].kl_div  # to have access to KL divergence of the dist.
+        transform = self.get_components()[0].from_dual_to_ordinary
+        priors = self.get_weights()  # shape (K,)
+        posteriors, _ = self._e_step(X)  # shape (N,K)
 
-    def dv_score(self, X):
-        X = np.asarray(X, dtype=float)
-        return davies_bouldin_score(X, self.hard_predict(X))
+        # compute BC
+        dual_parameters = []
+        for dist in self.get_components():
+            dual_parameters.append(dist.dual_param)
+        clus_dual = np.stack(dual_parameters)
+        clus_ord_1, clus_ord_2 = transform(clus_dual)
+        centroid_dual = np.average(clus_dual, axis=0, weights=self.get_weights())
+        centroid_ord_1, centroid_ord_2 = transform(centroid_dual)
+        bc = 0
+        for j in range(K):
+            bc += priors[j] * KL(clus_ord_1[j], clus_ord_2[j], centroid_ord_1, centroid_ord_2)
 
-    def silhouette_score(self, X):
-        X = np.asarray(X, dtype=float)
-        return silhouette_score(X, self.hard_predict(X))
+        # compute wc
+        log_pdf = self.log_pdf_components(X) # shape (N,K)
+        wc = -1*np.sum(log_pdf * posteriors) # negative log likelihood
+
+        return (bc / (K - 1)) / (wc / (N - K))
 
     # ---- Display ----
     @staticmethod

@@ -71,7 +71,7 @@ def show_location_model(loc_model: sc.MixtureModel, show=True, figsize=6):
 
     norm_strengths = loc_model.get_weights() / np.max(loc_model.get_weights()) * 0.8
     for strength, gauss, color in zip(norm_strengths, loc_model.get_components(), colors * 10):
-        mean, cov = gauss.get_params()
+        mean, cov = gauss.params
         add_ellips(ax, mean, cov, color=color, alpha=strength)
     if show:
         plt.show()
@@ -82,12 +82,12 @@ def show_location_model(loc_model: sc.MixtureModel, show=True, figsize=6):
 def show_direction_model(gauss: sc.MultivariateGaussian, dir_models: sc.MixtureModel, show=True, figsize=6):
     ax = mps.field(show=False, figsize=figsize)
     # for gauss in loc_model.submodels:
-    mean, cov = gauss.get_params()
+    mean, cov = gauss.params
     add_ellips(ax, mean, cov, alpha=0.5)
     x, y = mean
     for vonmises in dir_models.get_components():
-        loc, kappa = vonmises.get_params()
-        r = vonmises.get_mean_length()
+        loc, kappa = vonmises.params
+        r = vonmises.mean_length
         dx = np.cos(loc)
         dy = np.sin(loc)
         add_arrow(ax, x, y, 10*dx, 10*dy,
@@ -121,13 +121,13 @@ def show_all_models(loc_model: sc.MixtureModel,
     for i, (gauss, vmm) in enumerate(zip(loc_model.get_components(),
                                          dir_models)):
         col = palette[i]
-        mean, cov = gauss.get_params()
+        mean, cov = gauss.params
         add_ellips(ax, mean, cov, color=col, alpha=0.5)
         x0, y0 = mean
 
         for vonm in vmm.get_components():
-            loc, _ = vonm.get_params()
-            r = vonm.get_mean_length()  # in [0, 1]
+            loc, _ = vonm.params
+            r = vonm.mean_length  # in [0, 1]
             length = arrow_scale * r  # scale accordingly
             dx, dy = np.cos(loc), np.sin(loc)
             add_arrow(ax,
@@ -148,9 +148,10 @@ def show_direction_models(loc_models, dir_models, figsize=8):
 
         norm_strengths = loc_model.priors / np.max(loc_model.priors) * 0.8
         for i, (strength, gauss) in enumerate(zip(norm_strengths, loc_model.submodels)):
-            add_ellips(ax, gauss.mean, gauss.cov, alpha=strength)
+            mean, cov = gauss.params
+            add_ellips(ax, mean, cov, alpha=strength)
 
-            x, y = gauss.mean
+            x, y = gauss._mean
             for dir_model in dir_models:
                 if f"{loc_model.name}_{i}" == dir_model.name:
                     print(dir_model.name, dir_model.n_components)
@@ -305,7 +306,7 @@ def scatter_location_model(
     w = probs[pos_prob_idx]
 
     if loc_model.n_components > len(colors):
-        means = [m.mean for m in loc_model.submodels]
+        means = [m._mean for m in loc_model.submodels]
         good_colors = color_submodels(means, colors)
     else:
         good_colors = colors
@@ -327,7 +328,7 @@ def scatter_location_model_black(
     w = probs[pos_prob_idx]
 
     if loc_model.n_components > len(colors):
-        means = [m.mean for m in loc_model.submodels]
+        means = [m._mean for m in loc_model.submodels]
         good_colors = color_submodels(means, colors)
     else:
         good_colors = colors
@@ -355,7 +356,7 @@ def scatter_location_models(
         w = probs[pos_prob_idx]
 
         if model.n_components > len(colors):
-            means = [m.mean for m in model.submodels]
+            means = [m._mean for m in model.submodels]
             good_colors = color_submodels(means, colors)
         else:
             good_colors = colors
@@ -532,8 +533,8 @@ def show_component_differences(loc_models, dir_models, vec_p1, vec_p2, name1, na
     
     for loc_model in loc_models:
         
-        mini = min(difference.loc[difference.index.str.contains(f"^{loc_model.name}_")])
-        maxi = max(difference.loc[difference.index.str.contains(f"^{loc_model.name}_")])
+        mini = min(difference._loc[difference.index.str.contains(f"^{loc_model.name}_")])
+        maxi = max(difference._loc[difference.index.str.contains(f"^{loc_model.name}_")])
         ab = max(abs(mini), abs(maxi))
         
         if (ab == 0):
@@ -557,24 +558,24 @@ def show_component_differences(loc_models, dir_models, vec_p1, vec_p2, name1, na
         for i, gauss in enumerate(loc_model.submodels):
                       
             if (am_subclusters == 1).all():
-                    add_ellips(ax, gauss.mean, gauss.cov, 
-                                   color=cmap(norm(difference.loc[f"{loc_model.name}_{i}_0"])), alpha=1)
+                    add_ellips(ax, gauss._mean, gauss.cov,
+                               color=cmap(norm(difference._loc[f"{loc_model.name}_{i}_0"])), alpha=1)
             
             else:
-                add_ellips(ax, gauss.mean, gauss.cov, color='gainsboro')
+                add_ellips(ax, gauss._mean, gauss.cov, color='gainsboro')
 
-                x, y = gauss.mean
+                x, y = gauss._mean
                 for dir_model in dir_models:
                     if f"{loc_model.name}_{i}" == dir_model.name:
                         print(dir_model.name, dir_model.n_components)
 
                         for j, vonmises in enumerate(dir_model.submodels):
-                                dx = np.cos(vonmises.loc)[0]
-                                dy = np.sin(vonmises.loc)[0]
-                                add_arrow(ax, x, y, 10*dx, 10*dy, 
-                                              fc=cmap(norm(difference.loc[f"{loc_model.name}_{i}_{j}"])), 
-                                              arrowsize=4.5, linewidth=1
-                                             )
+                                dx = np.cos(vonmises._loc)[0]
+                                dy = np.sin(vonmises._loc)[0]
+                                add_arrow(ax, x, y, 10 * dx, 10 * dy,
+                                          fc=cmap(norm(difference._loc[f"{loc_model.name}_{i}_{j}"])),
+                                          arrowsize=4.5, linewidth=1
+                                          )
                         
         cb = plt.colorbar(plt.cm.ScalarMappable(cmap=cmap, norm=norm), ax=ax, fraction=0.065, pad=-0.05, orientation='horizontal')
         cb.ax.xaxis.set_ticks_position('bottom')
