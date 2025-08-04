@@ -119,6 +119,14 @@ class UnivariateGaussian(ExponentialFamily):
 
     # pdf inherited from base
 
+    @staticmethod
+    def kl_div(mean, var, mean_0, var_0):
+        """
+        Compute the KL divergence of a Univariate Gaussian distribution.
+        KL[N(mu, var) : N(mu0, var0)] = D_phi[eta : eta_0]
+        """
+        return 0.5 * (np.log(var_0 / var) + (var + (mean - mean_0) ** 2) / var_0 - 1)
+
     # ---- Calibration ----
     def fit_with_mle(self, X: np.ndarray, weights: np.ndarray | None = None) -> None:
         X, weights = self._input_process(X, weights)
@@ -206,40 +214,33 @@ class MultivariateGaussian(ExponentialFamily):
     # pdf inherited from base
 
     @staticmethod
-    def divergence(mean_1, cov_1, mean_2, cov_2):
+    def kl_div(mean, cov, mean_0, cov_0):
         """
-        Obtain the canonical Bregman divergence between two Multivariate Gaussian distributions.
-        Computed via log-partition Bregman divergence
-        D = psi(theta_1) - psi(theta_2) - inner(nabla psi(theta_2), theta_1 - theta_2)
+        Compute the KL divergence of a Multivariate Gaussian distribution.
+        KL[N(mu, Sigma) : N(mu0, Sigma0)] = D_phi[eta : eta_0]
         """
         try:
-            chol_1 = np.linalg.cholesky(cov_1)
-            chol_2 = np.linalg.cholesky(cov_2)
+            chol = np.linalg.cholesky(cov)
+            chol_0 = np.linalg.cholesky(cov_0)
         except np.linalg.LinAlgError as e:
             raise ValueError("Covariance must be positive-definite.") from e
 
-        d = mean_1.shape[0]
-        log_det_1 = 2 * np.sum(np.log(np.diag(chol_1)))
-        log_det_2 = 2 * np.sum(np.log(np.diag(chol_2)))
+        d = mean.shape[0]
+        diff =  mean - mean_0
 
-        # Compute Sigma^{-1}
-        inv_cov_1 = cho_solve((chol_1, True), np.eye(d))
-        inv_cov_2 = cho_solve((chol_2, True), np.eye(d))
+        # quadratic term
+        solve_diff = np.linalg.solve(cov_0, diff)
+        quadratic_term = np.inner(diff, solve_diff)
 
-        # Compute Sigma^{-1} * mu
-        alpha_1 = cho_solve((chol_1, True), mean_1)
-        alpha_2 = cho_solve((chol_2, True), mean_2)
+        # trace term
+        solve_trace = np.linalg.solve(cov, cov_0)
+        trace_term = np.trace(solve_trace)
 
-        # Compute mu^T * Sigma^{-1} * mu
-        beta_1 = np.inner(mean_1, alpha_1)
-        beta_2 = np.inner(mean_2, alpha_2)
+        # log determinants
+        log_det = 2 * np.sum(np.log(np.diag(chol)))
+        log_det_0 = 2 * np.sum(np.log(np.diag(chol_0)))
 
-        psi_1 = 0.5 * (d * np.log(2 * np.pi) + log_det_1 + beta_1)
-        psi_2 = 0.5 * (d * np.log(2 * np.pi) + log_det_2 + beta_2)
-        inner = np.inner(mean_2, alpha_1 - alpha_2)
-        inner -= 0.5 * np.sum((cov_2 + np.outer(mean_2, mean_2)) * (inv_cov_1 - inv_cov_2))
-
-        return psi_1 - psi_2 - inner
+        return 0.5 * (log_det_0 - log_det + quadratic_term + trace_term - d)
 
     # ----- Calibration -----
     def fit_with_mle(self, X: np.ndarray, weights: np.ndarray | None = None) -> None:
@@ -348,6 +349,16 @@ class VonMises(ExponentialFamily):
         return X @ self.natural_param - log_partition
 
     # pdf inherited from base
+
+    @staticmethod
+    def kl_div(loc, kappa, loc_0, kappa_0):
+        """
+        Compute the KL divergence of a von Mises distribution.
+        KL[vM(loc, kappa) : vM(loc0, kappa0)] = D_phi[eta : eta_0]
+        """
+        log_term = np.log(i0e(kappa_0) / i0e(kappa)) + kappa_0 - kappa
+        A = (i1e(kappa) / i0e(kappa))
+        return kappa * A + log_term - kappa_0 * A * np.cos(loc_0 - loc)
 
     # ----- Calibration -----
     def fit_with_mle(self, X: np.ndarray, weights: np.ndarray | None = None):
