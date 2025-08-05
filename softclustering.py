@@ -1,11 +1,11 @@
 import numpy as np
+import warnings
 from abc import ABC, abstractmethod
-from scipy.optimize import minimize, bisect
+from scipy.optimize import minimize
 from scipy.special import i0e, i1e, logsumexp
-from scipy.linalg import cho_solve, solve_triangular
 from sklearn.cluster import KMeans
-from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
-
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.neighbors import LocalOutlierFactor
 
 # -------------------- Base --------------------
 class ExponentialFamily(ABC):
@@ -597,27 +597,28 @@ class MixtureModel:
 
     def _initialize(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
-        labels = KMeans(n_clusters=self.n_clusters,
+        labels = KMeans(
+                        n_clusters=self.n_clusters,
                         init='k-means++',
                         max_iter=1,
-                        random_state=0).fit_predict(X)
+                        random_state=0
+                    ).fit_predict(X)
         N = X.shape[0]
         posteriors = np.zeros((N, self.n_clusters))
         posteriors[np.arange(N), labels] = 1.0
         # if there's an empty cluster, then uniform posterior probability
         counts = posteriors.sum(axis=0)
         zeros = counts == 0
-        if np.any(zeros):
-            raise ValueError("One or more cluster at initialization have zero datamembers.")
 
         for j, dist in enumerate(self._components):
             if not zeros[j]:
                 dist.fit_with_mle(X, weights=posteriors[:, j])
             else:
                 dist.fit_with_mle(X, weights=None)
-
-        self._weights = counts / counts.sum()
-
+        if ~np.any(zeros):
+            self._weights = counts / counts.sum()
+        else:
+            self._weights = np.ones(self.n_clusters) / float(self.n_clusters)
         self._is_initialized = True
 
     # ---- Getter ----
@@ -629,7 +630,7 @@ class MixtureModel:
 
     def get_posteriors(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
-        post, _ = self._e_step(X)
+        post, _ , _ = self._e_step(X)
         return post
 
     # ---- Densities ----
@@ -653,14 +654,16 @@ class MixtureModel:
     def _e_step(self, X):
         # E-step: Compute the posterior
         # take log to prevent underflow
-        log_prior = np.log(self._weights)  # (K,)
+        eps = np.finfo(float).tiny
+        log_prior = np.log(self._weights + eps)  # (K,)
         log_p = self.log_pdf_components(X)  # (N, K)
         log_numerator = log_prior + log_p  # (N, K)
         log_denominator = logsumexp(log_numerator, axis=1, keepdims=True)  # (N, 1)
         log_posterior = log_numerator - log_denominator  # (N, K)
         posterior = np.exp(log_posterior)  # responsibilities (N, K)
         log_likelihood = log_denominator.sum()
-        return posterior, log_likelihood
+        expected_log_likelihood = np.sum(log_numerator * posterior)
+        return posterior, log_likelihood, expected_log_likelihood
 
     def fit_em_classic(self, X, weight=None, tol=1e-6, max_iter=200, verbose=False):
         X = np.asarray(X, dtype=float)
@@ -672,7 +675,7 @@ class MixtureModel:
         logger = []
         for it in range(max_iter):
             # E-step: Compute the posterior
-            posterior, log_likelihood = self._e_step(X)
+            posterior, _ , log_likelihood = self._e_step(X)
             logger.append(log_likelihood)
 
             # M-step: Maximize weighted log-likelihood
@@ -705,7 +708,7 @@ class MixtureModel:
         logger = []
         for it in range(max_iter):
             # E-step: Compute the posterior
-            posterior, log_likelihood = self._e_step(X)
+            posterior, _ , log_likelihood = self._e_step(X)
             logger.append(log_likelihood)
 
             # M-step: Maximize weighted log-likelihood
@@ -741,7 +744,7 @@ class MixtureModel:
         logger = []
         for it in range(max_iter):
             # E-step: Compute the posterior
-            posterior, log_likelihood = self._e_step(X)
+            posterior, _ , log_likelihood = self._e_step(X)
             logger.append(log_likelihood)
 
             # M-step: Maximize weighted log-likelihood
@@ -762,7 +765,7 @@ class MixtureModel:
         return logger
 
     # ---- Performance metrics ---
-    def bic(self, X: np.ndarray):
+    def bic_score(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
         ll = self.log_pdf(X).sum()
         dist_params = self.get_components()[0].params
@@ -774,7 +777,7 @@ class MixtureModel:
                 p += param.size * self.n_clusters
         return np.log(X.shape[0]) * p - 2 * ll
 
-    def aic(self, X: np.ndarray):
+    def aic_score(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
         ll = self.log_pdf(X).sum()
         dist_params = self.get_components()[0].params
@@ -788,7 +791,7 @@ class MixtureModel:
 
     def hard_predict(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
-        posteriors, _ = self._e_step(X)
+        posteriors, _ , _ = self._e_step(X)
         labels = np.argmax(posteriors, axis=1)
         return labels
 
@@ -807,7 +810,7 @@ class MixtureModel:
         KL = self.get_components()[0].kl_div  # to have access to KL divergence of the dist.
         transform = self.get_components()[0].from_dual_to_ordinary
         priors = self.get_weights()  # shape (K,)
-        posteriors, _ = self._e_step(X)  # shape (N,K)
+        _ , _ , expected_log_ll = self._e_step(X)
 
         # compute BC
         dual_parameters = []
@@ -822,8 +825,7 @@ class MixtureModel:
             bc += priors[j] * KL(clus_ord_1[j], clus_ord_2[j], centroid_ord_1, centroid_ord_2)
 
         # compute wc
-        log_pdf = self.log_pdf_components(X) # shape (N,K)
-        wc = -1*np.sum(log_pdf * posteriors) # negative log likelihood
+        wc = -1*expected_log_ll # negative log likelihood weighted by posteriors
 
         return (bc / (K - 1)) / (wc / (N - K))
 
@@ -850,7 +852,7 @@ class MixtureModel:
         return "\n".join([header, *lines])
 
 
-def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_dir: int, choose="classic"):
+def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_dir: int, choose="classic", gmm = None):
     """
     Perform a two-layers clustering scheme, starting with a K_loc-GMM, and then, for each Gaussian cluster performs a K_dir-vMMM.
     vMMM: von Mises Mixture Model. GMM: Gaussian Mixture Model.
@@ -863,13 +865,14 @@ def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_d
     if dir_data.shape[0] != loc_data.shape[0]:
         raise ValueError("Sample size don't match.")
     N = loc_data.shape[0]
-    gmm_components = [MultivariateGaussian() for _ in range(K_loc)]
-    gmm = MixtureModel(gmm_components)
-    match choose:
-        case "bregman":
-            _ = gmm.fit_em_bregman(loc_data)
-        case _:
-            _ = gmm.fit_em_classic(loc_data)
+    if gmm is None:
+        gmm_components = [MultivariateGaussian() for _ in range(K_loc)]
+        gmm = MixtureModel(gmm_components)
+        match choose:
+            case "bregman":
+                _ = gmm.fit_em_bregman(loc_data)
+            case _:
+                _ = gmm.fit_em_classic(loc_data)
 
     # get the posteriors of the first layer
     posteriors = gmm.get_posteriors(loc_data)
@@ -879,18 +882,13 @@ def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_d
         # first layer posterior is fixed
         loc_posterior = posteriors[:, loc_cluster]
         # obtain initial weights of the second layer
-        # labels = KMeans(n_clusters=K_dir,
+        #labels = KMeans(n_clusters=K_dir,
         #                init='k-means++',
-        #                random_state=0).fit_predict(dir_data,
-        #                                            sample_weight = loc_posterior)
-        labels = KMeans(n_clusters=K_dir,
-                        init='k-means++',
-                        max_iter=1,
-                        random_state=0).fit_predict(dir_data, sample_weight=loc_posterior)
-
-        one_hot = np.zeros((N, K_dir))
-        one_hot[np.arange(N), labels] = 1.0
-        initial_weight = one_hot.sum(axis=0) / one_hot.sum()
+        #                max_iter=1,
+        #                random_state=0).fit_predict(dir_data, sample_weight=loc_posterior)
+        #one_hot = np.zeros((N, K_dir))
+        #one_hot[np.arange(N), labels] = 1.0
+        #initial_weight = one_hot.sum(axis=0) / one_hot.sum()
         vmmm_components = [VonMises() for _ in range(K_dir)]
         vmmm = MixtureModel(vmmm_components, None)
 
@@ -906,3 +904,45 @@ def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_d
         vmmm_list.append(vmmm)
 
     return gmm, vmmm_list
+
+def consolidate(actions):
+    #actions.fillna(0, inplace=True)
+
+    #Consolidate corner_short and corner_crossed
+    corner_idx = actions.type_name.str.contains("corner")
+    actions["type_name"] = actions["type_name"].mask(corner_idx, "corner")
+
+    #Consolidate freekick_short, freekick_crossed, and shot_freekick
+    freekick_idx = actions.type_name.str.contains("freekick")
+    actions["type_name"] = actions["type_name"].mask(freekick_idx, "freekick")
+
+    #Consolidate keeper_claim, keeper_punch, keeper_save, keeper_pick_up
+    keeper_idx = actions.type_name.str.contains("keeper")
+    actions["type_name"] = actions["type_name"].mask(keeper_idx, "keeper_action")
+
+    actions["start_x"] = actions["start_x"].mask(actions.type_name == "shot_penalty", 94.5)
+    actions["start_y"] = actions["start_y"].mask(actions.type_name == "shot_penalty", 34)
+
+    return actions
+
+def add_noise(actions):
+    # Start locations
+    start_list = ["cross", "shot", "dribble", "pass", "keeper_action", "clearance", "goalkick"]
+    mask = actions["type_name"].isin(start_list)
+    noise = np.random.normal(0, 0.5, size=actions.loc[mask, ["start_x", "start_y"]].shape)
+    actions.loc[mask, ["start_x", "start_y"]] += noise
+
+    # End locations
+    end_list = ["cross", "shot", "dribble", "pass", "keeper_action", "throw_in", "corner", "freekick", "shot_penalty"]
+    mask = actions["type_name"].isin(end_list)
+    noise = np.random.normal(0, 0.5, size=actions.loc[mask, ["end_x", "end_y"]].shape)
+    actions.loc[mask, ["end_x", "end_y"]] += noise
+
+    return actions
+
+def remove_outliers(actions, verbose=False):
+    X = actions[["start_x","start_y","end_x","end_y"]].to_numpy(dtype=float)
+    inliers = LocalOutlierFactor(contamination="auto").fit_predict(X)
+    if verbose:
+        print(f"Remove {(inliers==-1).sum()} out of {X.shape[0]} datapoints.")
+    return actions[inliers==1]
