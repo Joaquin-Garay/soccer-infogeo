@@ -3,9 +3,10 @@ import warnings
 from abc import ABC, abstractmethod
 from scipy.optimize import minimize
 from scipy.special import i0e, i1e, logsumexp
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, kmeans_plusplus
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.neighbors import LocalOutlierFactor
+
 
 # -------------------- Base --------------------
 class ExponentialFamily(ABC):
@@ -20,6 +21,12 @@ class ExponentialFamily(ABC):
         """Default pdf via exp(log_pdf)."""
         return np.exp(self.log_pdf(np.asarray(X, dtype=float)))
 
+
+    @staticmethod
+    @abstractmethod
+    def kl_div(p_param1, p_param2, q_param1, q_param2):
+        pass
+
     # ---- Getters and Setter ----
     @property
     @abstractmethod
@@ -33,13 +40,15 @@ class ExponentialFamily(ABC):
         """ Get dual parameter vector. Mean of sufficient statistc vector."""
         pass
 
-    # ---- Calibration ----
+
+    @staticmethod
     @abstractmethod
-    def fit_with_mle(self, X: np.ndarray, weights: np.ndarray | None = None):
+    def from_dual_to_ordinary(eta: np.ndarray):
         pass
 
+    # ---- Calibration ----
     @abstractmethod
-    def fit_with_min_bregman(self, X: np.ndarray, weights: np.ndarray | None = None):
+    def fit(self, X: np.ndarray, sample_weight: np.ndarray | None = None, case: str | None = None):
         pass
 
     # ---- Utility methods ----
@@ -100,8 +109,8 @@ class UnivariateGaussian(ExponentialFamily):
         return np.array([self._mean, self._variance]).copy()
 
     @params.setter
-    def params(self, mean: float, variance: float):
-        self._mean, self._variance = float(mean), float(variance)
+    def params(self, value: list[float, float]):
+        self._mean, self._variance = value
         self._validate()
         self._update_params()
 
@@ -155,23 +164,23 @@ class UnivariateGaussian(ExponentialFamily):
         return 0.5 * (np.log(var_0 / var) + (var + (mean - mean_0) ** 2) / var_0 - 1)
 
     # ---- Calibration ----
-    def fit_with_mle(self, X: np.ndarray, weights: np.ndarray | None = None) -> None:
-        X, weights = self._input_process(X, weights)
-        mu = np.average(X, weights=weights)
-        diff = X - mu
-        variance = np.inner(weights * diff, diff)
+    def fit(self, X: np.ndarray, sample_weight: np.ndarray | None = None, case: str = "classic") -> None:
+        X, sample_weight = self._input_process(X, sample_weight)
+        match case:
+            case "bregman":
+                # compute dual/expectation parameters using sufficient statistics.
+                eta = np.array([np.average(X, weights=sample_weight),
+                                np.average(X ** 2, weights=sample_weight)])
+                self.dual_param = eta
+            case _:
+                mu = np.average(X, weights=sample_weight)
+                diff = X - mu
+                variance = np.inner(sample_weight * diff, diff)
 
-        self._mean = mu
-        self._variance = variance
-        self._validate()
-        self._update_params()
-
-    def fit_with_min_bregman(self, X: np.ndarray, weights: np.ndarray | None = None) -> None:
-        X, weights = self._input_process(X, weights)
-        # compute dual/expectation parameters using sufficient statistics.
-        eta = np.array([np.average(X, weights=weights),
-                        np.average(X ** 2, weights=weights)])
-        self.dual_param = eta
+                self._mean = mu
+                self._variance = variance
+                self._validate()
+                self._update_params()
 
     def __repr__(self) -> str:
         return f"UnivariateGaussian(mean={self._mean:.3f}, variance={self._variance:.3f})"
@@ -327,29 +336,29 @@ class MultivariateGaussian(ExponentialFamily):
         return 0.5 * (log_det_0 - log_det + quadratic_term + trace_term - d)
 
     # ----- Calibration -----
-    def fit_with_mle(self, X: np.ndarray, weights: np.ndarray | None = None) -> None:
-        X, weights = self._input_process(X, weights)
-        mu = np.average(X, axis=0, weights=weights)
-        diff = X - mu
-        # Broadcasting weights to columns; (N,1) * (N,d) -> weighted rows
-        weighted_diff = weights[:, np.newaxis] * diff
-        cov = weighted_diff.T @ diff
-        cov += 1e-9 * np.eye(cov.shape[0])  # Numerical jitter if near-singular
+    def fit(self, X: np.ndarray, sample_weight: np.ndarray | None = None, case: str = "classic") -> None:
+        X, sample_weight = self._input_process(X, sample_weight)
+        match case:
+            case "bregman":
+                # form sufficient stats and average
+                suf_stat = self.get_sufficient_stat(X)  # shape (N, d + d^2)
+                dual = np.average(suf_stat, axis=0, weights=sample_weight)  # length d + d^2
+                # update params
+                self.dual_param = dual
+                self._validate()
+                self._cache()
+            case _:
+                mu = np.average(X, axis=0, weights=sample_weight)
+                diff = X - mu
+                # Broadcasting weights to columns; (N,1) * (N,d) -> weighted rows
+                weighted_diff = sample_weight[:, np.newaxis] * diff
+                cov = weighted_diff.T @ diff
+                cov += 1e-9 * np.eye(cov.shape[0])  # Numerical jitter if near-singular
 
-        self._mean = mu
-        self._covariance = cov
-        self._validate()
-        self._cache()
-
-    def fit_with_min_bregman(self, X: np.ndarray, weights: np.ndarray | None = None) -> None:
-        X, weights = self._input_process(X, weights)  # normalizes weights
-        # form sufficient stats and average
-        suf_stat = self.get_sufficient_stat(X)  # shape (N, d + d^2)
-        dual = np.average(suf_stat, axis=0, weights=weights)  # length d + d^2
-        # update params
-        self.dual_param = dual
-        self._validate()
-        self._cache()
+                self._mean = mu
+                self._covariance = cov
+                self._validate()
+                self._cache()
 
     def __repr__(self):
         mean_str = np.array2string(self._mean, precision=3, separator=' ', suppress_small=True)
@@ -365,7 +374,7 @@ class VonMises(ExponentialFamily):
     X must be in sufficient statistic form: [cos x, sin x].
     """
 
-    def __init__(self, loc=0.0, kappa=0.01):
+    def __init__(self, loc=0.0, kappa=1.0):
         super().__init__()
         self._loc = float(loc)
         self._kappa = float(kappa)
@@ -439,13 +448,12 @@ class VonMises(ExponentialFamily):
 
     @natural_param.setter
     def natural_param(self, theta: np.ndarray):
-        theta = np.asarray(theta, dtype=float)
         if theta.shape != (2,):
             raise ValueError("natural_param must be a length-2 vector.")
         self._natural_param = theta
         self._loc = np.arctan2(theta[1], theta[0])
-        # A(kappa=100) = 0.9948
-        self._kappa = np.minimum(np.linalg.norm(theta), 100.0)
+        # A(kappa=10) = 0.948599
+        self._kappa = np.minimum(np.sqrt(np.inner(theta, theta)), 10.0)
         self._A = self._mean_length(self._kappa)
         self._validate()
         self._dual_param = np.array([self._A * np.cos(self._loc),
@@ -457,13 +465,10 @@ class VonMises(ExponentialFamily):
 
     @dual_param.setter
     def dual_param(self, eta: np.ndarray):
-        eta = np.asarray(eta, dtype=float)
-        if eta.shape != (2,):
-            raise ValueError("dual_param must be a length-2 vector.")
         self._dual_param = eta
         self._loc = np.arctan2(eta[1], eta[0])
         # A(kappa=100) = 0.9948
-        self._A = np.minimum(np.linalg.norm(eta), 0.9948)
+        self._A = np.minimum(np.sqrt(np.inner(eta, eta)), 0.9485998259548459)  # such that kappa <= 10.0
         self._kappa = self._inv_mean_length(self._A)
         self._validate()
         self._natural_param = np.array([self._kappa * np.cos(self._loc),
@@ -486,7 +491,7 @@ class VonMises(ExponentialFamily):
             eta = eta[np.newaxis, :]
 
         loc = np.arctan2(eta[:, 1], eta[:, 0])  # shape (n,)
-        A = np.minimum(np.linalg.norm(eta, axis=1), 0.9948)
+        A = np.minimum(np.linalg.norm(eta, axis=1), 0.9485998259548459)
 
         # vectorized Best–Fisher inversion:
         #   if A<0.53: 2A + A^3 + 5A^5/6
@@ -524,55 +529,51 @@ class VonMises(ExponentialFamily):
         return kappa * A + log_term - kappa_0 * A * np.cos(loc_0 - loc)
 
     # ----- Calibration -----
-    def fit_with_mle(self, X: np.ndarray, weights: np.ndarray | None = None):
-        X, weights = self._input_process(X, weights)
-        const = np.log(2 * np.pi)
+    def fit(self, X: np.ndarray, sample_weight: np.ndarray | None = None, case: str = "classic"):
+        X, sample_weight = self._input_process(X, sample_weight)
+        match case:
+            case "bregman":
+                # compute dual/expectation parameters using sufficient statistics.
+                eta = np.average(X, axis=0, weights=sample_weight)
+                self.dual_param = eta
+            case "approximation":
+                C = np.sum(sample_weight * X[:, 0])
+                S = np.sum(sample_weight * X[:, 1])
+                loc = np.arctan2(S, C)
+                R = np.minimum(np.sqrt(C * C + S * S), 0.9485998259548459)
+                kappa = R * (2 - R * R) / (1 - R * R)
 
-        def neg_ll(params):
-            loc, kappa = params
-            if kappa <= 0:
-                return np.inf
-            # i0e(kappa) = exp(-kappa)*i0(kappa)
-            # -log(i0(kappa)) = -log(i0e(kappa)) - kappa
-            ll = np.sum(weights * (kappa * (np.cos(loc) * X[:, 0] \
-                                            + np.sin(loc) * X[:, 1]) \
-                                   - np.log(i0e(kappa)) - kappa - const))
-            return -ll  # minimize negative
+                self._loc, self._kappa = loc, kappa
+                self._validate()
+                self._update_params()
 
-        C = np.sum(weights * X[:, 0])
-        S = np.sum(weights * X[:, 1])
-        initials = np.array([np.arctan2(S, C), 1.0])
-        bnds = ((-np.pi, np.pi), (1e-8, None))
+            case _:  # Classical EM approach
+                const = np.log(2 * np.pi)
 
-        result = minimize(
-            fun=neg_ll,
-            x0=initials,
-            method="L-BFGS-B",
-            bounds=bnds
-        )
-        self._loc, self._kappa = result.x
-        self._update_params()
-        return result
+                def neg_ll(params):
+                    loc, kappa = params
+                    if kappa <= 0:
+                        return np.inf
+                    # i0e(kappa) = exp(-kappa)*i0(kappa)
+                    # -log(i0(kappa)) = -log(i0e(kappa)) - kappa
+                    ll = np.sum(sample_weight * (kappa * (np.cos(loc) * X[:, 0]
+                                                          + np.sin(loc) * X[:, 1])
+                                                 - np.log(i0e(kappa)) - kappa - const))
+                    return -ll  # minimize negative
 
-    def fit_with_mle_proxy(self, X: np.ndarray, weights: np.ndarray | None = None):
-        X, weights = self._input_process(X, weights)
-
-        C = np.sum(weights * X[:, 0])
-        S = np.sum(weights * X[:, 1])
-        loc = np.arctan2(S, C)
-        R = min(np.sqrt(C * C + S * S), 0.99)
-        kappa = R * (2 - R * R) / (1 - R * R)
-
-        self._loc, self._kappa = loc, kappa
-        self._update_params()
-        return loc, kappa
-
-    def fit_with_min_bregman(self, X: np.ndarray, weights: np.ndarray | None = None) -> None:
-        X, weights = self._input_process(X, weights)
-
-        # compute dual/expectation parameters using sufficient statistics.
-        eta = np.average(X, axis=0, weights=weights)
-        self.dual_param = eta
+                C = np.sum(sample_weight * X[:, 0])
+                S = np.sum(sample_weight * X[:, 1])
+                initials = np.array([np.arctan2(S, C), self._kappa])
+                bnds = ((-np.pi, np.pi), (1e-8, 10.0))
+                result = minimize(
+                    fun=neg_ll,
+                    x0=initials,
+                    method="L-BFGS-B",
+                    bounds=bnds
+                )
+                self._loc, self._kappa = result.x
+                self._validate()
+                self._update_params()
 
     def __repr__(self):
         return f"VonMises(loc={self._loc * 180 / np.pi:.1f}º, kappa={self._kappa:.3f})"
@@ -580,12 +581,18 @@ class VonMises(ExponentialFamily):
 
 # -------------------- Mixture Model --------------------
 class MixtureModel:
-    def __init__(self, components: list[ExponentialFamily], weights: np.ndarray | None = None):
+    def __init__(self, components: list[ExponentialFamily], weights: np.ndarray | None = None, init: str | None = None):
         self._components = components
-        self.n_clusters = len(components)
+        self.n_components = len(components)
+
+        if init in ["k-means++", "random"]:
+            self._init = init
+        else:
+            self._init = "k-means++"
+
         if weights is not None:
             weights = np.asarray(weights, dtype=float)
-            if weights.ndim != 1 or weights.size != self.n_clusters:
+            if weights.ndim != 1 or weights.size != self.n_components:
                 raise ValueError("Components and weights mismatch.")
             if np.any(weights <= 0):
                 raise ValueError("All weights must be > 0.")
@@ -595,31 +602,78 @@ class MixtureModel:
             self._weights = None
             self._is_initialized = False
 
-    def _initialize(self, X: np.ndarray):
+    def _initialize(self, X: np.ndarray, sample_weight: np.ndarray) -> None:
         X = np.asarray(X, dtype=float)
-        labels = KMeans(
-                        n_clusters=self.n_clusters,
-                        init='k-means++',
-                        max_iter=1,
-                        random_state=0
-                    ).fit_predict(X)
-        N = X.shape[0]
-        posteriors = np.zeros((N, self.n_clusters))
-        posteriors[np.arange(N), labels] = 1.0
-        # if there's an empty cluster, then uniform posterior probability
-        counts = posteriors.sum(axis=0)
-        zeros = counts == 0
+        n_samples = X.shape[0]
+        eps        = 10 * np.finfo(X.dtype).eps
+        rng        = np.random.RandomState(42)
 
-        for j, dist in enumerate(self._components):
-            if not zeros[j]:
-                dist.fit_with_mle(X, weights=posteriors[:, j])
-            else:
-                dist.fit_with_mle(X, weights=None)
-        if ~np.any(zeros):
-            self._weights = counts / counts.sum()
-        else:
-            self._weights = np.ones(self.n_clusters) / float(self.n_clusters)
+        # Build the posterior matrix for the chosen strategy
+        post = self._build_posteriors(X, sample_weight, rng, n_samples)
+
+        # Fallback: if any cluster got zero responsibility, switch to
+        #    fully random responsibilities for that run
+        if (post.sum(axis=0) == 0).any():
+            post = rng.random((n_samples, self.n_components))
+
+        # Fit components & weights once
+        self._fit_components_from_posteriors(X, post, sample_weight, eps)
         self._is_initialized = True
+
+    def _build_posteriors(
+        self,
+        X: np.ndarray,
+        sample_weight: np.ndarray,
+        rng: np.random.RandomState,
+        n_samples: int,
+    ) -> np.ndarray:
+        """Return an (n_samples × K) responsibility matrix for the init method."""
+        post = np.zeros((n_samples, self.n_components), dtype=float)
+        match self._init:
+            case "k-means++":
+                _, idx = kmeans_plusplus(
+                    X, self.n_components, random_state=rng, sample_weight=sample_weight
+                )
+                post[idx, np.arange(self.n_components)] = 1.0
+                return post
+
+            case "k-means":
+                labels = KMeans(
+                    n_clusters=self.n_components,
+                    init="k-means++",
+                    n_init=1,
+                    max_iter=100,
+                    random_state=rng,
+                   #sample_weight=sample_weight,
+                ).fit_predict(X)
+                post[np.arange(n_samples), labels] = 1.0  # as in hard clustering
+                return post
+
+            case "random_from_data":
+                idx = rng.choice(n_samples, self.n_components, replace=False)
+                post[idx, np.arange(self.n_components)] = 1.0
+                return post
+
+            case "random":
+                # Empty -> triggers fallback to random responsibilities
+                return post
+
+            case _:
+                raise ValueError(f"Unknown init method: {self._init!r}")
+
+    def _fit_components_from_posteriors(
+        self,
+        X: np.ndarray,
+        post: np.ndarray,
+        sample_weight: np.ndarray,
+        eps: float,
+    ) -> None:
+        """Fit each component and update mixture weights once."""
+        for j, dist in enumerate(self._components):
+            dist.fit(X, sample_weight=post[:, j] * sample_weight)
+
+        self._weights = post.sum(axis=0) + eps
+        self._weights /= self._weights.sum()
 
     # ---- Getter ----
     def get_weights(self):
@@ -630,7 +684,7 @@ class MixtureModel:
 
     def get_posteriors(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
-        post, _ , _ = self._e_step(X)
+        post, _, _ = self._e_step(X)
         return post
 
     # ---- Densities ----
@@ -665,96 +719,34 @@ class MixtureModel:
         expected_log_likelihood = np.sum(log_numerator * posterior)
         return posterior, log_likelihood, expected_log_likelihood
 
-    def fit_em_classic(self, X, weight=None, tol=1e-6, max_iter=200, verbose=False):
+    def fit_em(self, X, sample_weight=None, tol=1e-8, max_iter=1000, verbose=False, case="classic"):
         X = np.asarray(X, dtype=float)
         N = X.shape[0]
+        if sample_weight is None:
+            sample_weight = np.ones(N) / N
         if not self._is_initialized:
-            self._initialize(X)
-        if weight is None:
-            weight = np.ones(N)
+            self._initialize(X, sample_weight)
+
         logger = []
         for it in range(max_iter):
             # E-step: Compute the posterior
-            posterior, _ , log_likelihood = self._e_step(X)
+            posterior, _, log_likelihood = self._e_step(X)
             logger.append(log_likelihood)
 
             # M-step: Maximize weighted log-likelihood
             # update priors
-            self._weights = np.average(posterior, axis=0, weights=weight)  # (K,)
+            self._weights = np.average(posterior, axis=0, weights=sample_weight)  # (K,)
+            # lift the priors when one of them is below 1 basis points
+            if np.min(self._weights) <= 0.0001:
+                self._weights = (self._weights + 0.0001) / (1 + self.n_components * 0.0001)
             # update distribution parameters
-            for k, comp in enumerate(self._components):
-                comp.fit_with_mle(X, weight * posterior[:, k])
+            for j, comp in enumerate(self._components):
+                comp.fit(X, sample_weight=sample_weight * posterior[:, j], case=case)
 
             # verbose
             if verbose:
                 print(f"Data log-likelihood at iter {it}: {logger[-1]:.2f}")
             # check convergence
-            if it > 0 and abs(logger[-1] - logger[-2]) < tol:
-                if verbose:
-                    print(f"Converged at iter {it}: Delta LL={logger[-1] - logger[-2]:.3e}")
-                break
-        else:
-            if verbose:
-                print("Reached max_iter without full convergence.")
-        return logger
-
-    def fit_em_bregman(self, X, tol=1e-6, weight=None, max_iter=200, verbose=False):
-        X = np.asarray(X, dtype=float)
-        N = X.shape[0]
-        if not self._is_initialized:
-            self._initialize(X)
-        if weight is None:
-            weight = np.ones(N)
-        logger = []
-        for it in range(max_iter):
-            # E-step: Compute the posterior
-            posterior, _ , log_likelihood = self._e_step(X)
-            logger.append(log_likelihood)
-
-            # M-step: Maximize weighted log-likelihood
-            # update priors
-            self._weights = np.average(posterior, axis=0, weights=weight)  # (K,)
-            # update distribution parameters
-            for k, comp in enumerate(self._components):
-                comp.fit_with_min_bregman(X, weight * posterior[:, k])
-
-            # verbose
-            if verbose:
-                print(f"Data log-likelihood at iter {it}: {logger[-1]:.2f}")
-            # check convergence
-            if it > 0 and abs(logger[-1] - logger[-2]) < tol:
-                if verbose:
-                    print(f"Converged at iter {it}: Delta LL={logger[-1] - logger[-2]:.3e}")
-                break
-        else:
-            if verbose:
-                print("Reached max_iter without full convergence.")
-        return logger
-
-    def fit_em_vonmises_approx(self, X, weight=None, tol=1e-6, max_iter=200, verbose=False):
-        if not all(isinstance(c, VonMises) for c in self._components):
-            raise TypeError("All components must be VonMises.")
-
-        X = np.asarray(X, dtype=float)
-        N = X.shape[0]
-        if not self._is_initialized:
-            self._initialize(X)
-        if weight is None:
-            weight = np.ones(N)
-        logger = []
-        for it in range(max_iter):
-            # E-step: Compute the posterior
-            posterior, _ , log_likelihood = self._e_step(X)
-            logger.append(log_likelihood)
-
-            # M-step: Maximize weighted log-likelihood
-            # update priors
-            self._weights = np.average(posterior, axis=0, weights=weight)  # (K,)
-            # update distribution parameters
-            for k, comp in enumerate(self._components):
-                comp.fit_with_mle_proxy(X, weight * posterior[:, k])
-
-            # ---------- Check convergence ----------
             if it > 0 and abs(logger[-1] - logger[-2]) < tol:
                 if verbose:
                     print(f"Converged at iter {it}: Delta LL={logger[-1] - logger[-2]:.3e}")
@@ -769,29 +761,29 @@ class MixtureModel:
         X = np.asarray(X, dtype=float)
         ll = self.log_pdf(X).sum()
         dist_params = self.get_components()[0].params
-        p = self.n_clusters - 1
+        p = self.n_components - 1
         for param in dist_params:
             if isinstance(param, float):
                 p += 1
             else:
-                p += param.size * self.n_clusters
+                p += param.size * self.n_components
         return np.log(X.shape[0]) * p - 2 * ll
 
     def aic_score(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
         ll = self.log_pdf(X).sum()
         dist_params = self.get_components()[0].params
-        p = self.n_clusters - 1
+        p = self.n_components - 1
         for param in dist_params:
             if isinstance(param, float):
                 p += 1
             else:
-                p += param.size * self.n_clusters
+                p += param.size * self.n_components
         return 2 * p - 2 * ll
 
     def hard_predict(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
-        posteriors, _ , _ = self._e_step(X)
+        posteriors, _, _ = self._e_step(X)
         labels = np.argmax(posteriors, axis=1)
         return labels
 
@@ -806,11 +798,11 @@ class MixtureModel:
         # precompute functions and values
         X = np.asarray(X, dtype=float)
         N = X.shape[0]
-        K = self.n_clusters
+        K = self.n_components
         KL = self.get_components()[0].kl_div  # to have access to KL divergence of the dist.
         transform = self.get_components()[0].from_dual_to_ordinary
         priors = self.get_weights()  # shape (K,)
-        _ , _ , expected_log_ll = self._e_step(X)
+        _, _, expected_log_ll = self._e_step(X)
 
         # compute BC
         dual_parameters = []
@@ -825,7 +817,7 @@ class MixtureModel:
             bc += priors[j] * KL(clus_ord_1[j], clus_ord_2[j], centroid_ord_1, centroid_ord_2)
 
         # compute wc
-        wc = -1*expected_log_ll # negative log likelihood weighted by posteriors
+        wc = -1 * expected_log_ll  # negative log likelihood weighted by posteriors
 
         return (bc / (K - 1)) / (wc / (N - K))
 
@@ -836,7 +828,7 @@ class MixtureModel:
         return f"  ├─ ({idx}) w={w_str}  {comp!r}"
 
     def __repr__(self) -> str:
-        header = f"{self.__class__.__name__}(n_clusters={self.n_clusters})"
+        header = f"{self.__class__.__name__}(n_components={self.n_components})"
         if self._components is None:
             return header + "  [no components]"
 
@@ -852,7 +844,13 @@ class MixtureModel:
         return "\n".join([header, *lines])
 
 
-def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_dir: int, choose="classic", gmm = None):
+def two_layer_scheme(loc_data: np.ndarray,
+                     dir_data: np.ndarray,
+                     K_loc: int,
+                     K_dir: int,
+                     choose="classic",
+                     init="k-means++",
+                     gmm=None):
     """
     Perform a two-layers clustering scheme, starting with a K_loc-GMM, and then, for each Gaussian cluster performs a K_dir-vMMM.
     vMMM: von Mises Mixture Model. GMM: Gaussian Mixture Model.
@@ -867,12 +865,12 @@ def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_d
     N = loc_data.shape[0]
     if gmm is None:
         gmm_components = [MultivariateGaussian() for _ in range(K_loc)]
-        gmm = MixtureModel(gmm_components)
-        match choose:
-            case "bregman":
-                _ = gmm.fit_em_bregman(loc_data)
-            case _:
-                _ = gmm.fit_em_classic(loc_data)
+        gmm = MixtureModel(gmm_components,
+                           weights=None,
+                           init='k-means++')
+        gmm.fit_em(loc_data,
+                   sample_weight=None,
+                   case=choose)
 
     # get the posteriors of the first layer
     posteriors = gmm.get_posteriors(loc_data)
@@ -881,42 +879,31 @@ def two_layer_scheme(loc_data: np.ndarray, dir_data: np.ndarray, K_loc: int, K_d
     for loc_cluster in range(K_loc):
         # first layer posterior is fixed
         loc_posterior = posteriors[:, loc_cluster]
-        # obtain initial weights of the second layer
-        #labels = KMeans(n_clusters=K_dir,
-        #                init='k-means++',
-        #                max_iter=1,
-        #                random_state=0).fit_predict(dir_data, sample_weight=loc_posterior)
-        #one_hot = np.zeros((N, K_dir))
-        #one_hot[np.arange(N), labels] = 1.0
-        #initial_weight = one_hot.sum(axis=0) / one_hot.sum()
         vmmm_components = [VonMises() for _ in range(K_dir)]
-        vmmm = MixtureModel(vmmm_components, None)
-
-        match choose:
-            case "bregman":
-                _ = vmmm.fit_em_bregman(dir_data, weight=loc_posterior)
-            case "classic":
-                _ = vmmm.fit_em_classic(dir_data, weight=loc_posterior)
-            case "soccermix":
-                _ = vmmm.fit_em_vonmises_approx(dir_data, weight=loc_posterior)
-            case _:
-                raise ValueError("Invalid choice")
+        vmmm = MixtureModel(vmmm_components,
+                            weights=None,
+                            init=init)
+        _ = vmmm.fit_em(dir_data,
+                        sample_weight=loc_posterior,
+                        case=choose)
         vmmm_list.append(vmmm)
+
 
     return gmm, vmmm_list
 
-def consolidate(actions):
-    #actions.fillna(0, inplace=True)
 
-    #Consolidate corner_short and corner_crossed
+def consolidate(actions):
+    # actions.fillna(0, inplace=True)
+
+    # Consolidate corner_short and corner_crossed
     corner_idx = actions.type_name.str.contains("corner")
     actions["type_name"] = actions["type_name"].mask(corner_idx, "corner")
 
-    #Consolidate freekick_short, freekick_crossed, and shot_freekick
+    # Consolidate freekick_short, freekick_crossed, and shot_freekick
     freekick_idx = actions.type_name.str.contains("freekick")
     actions["type_name"] = actions["type_name"].mask(freekick_idx, "freekick")
 
-    #Consolidate keeper_claim, keeper_punch, keeper_save, keeper_pick_up
+    # Consolidate keeper_claim, keeper_punch, keeper_save, keeper_pick_up
     keeper_idx = actions.type_name.str.contains("keeper")
     actions["type_name"] = actions["type_name"].mask(keeper_idx, "keeper_action")
 
@@ -924,6 +911,7 @@ def consolidate(actions):
     actions["start_y"] = actions["start_y"].mask(actions.type_name == "shot_penalty", 34)
 
     return actions
+
 
 def add_noise(actions):
     # Start locations
@@ -940,9 +928,86 @@ def add_noise(actions):
 
     return actions
 
+
 def remove_outliers(actions, verbose=False):
-    X = actions[["start_x","start_y","end_x","end_y"]].to_numpy(dtype=float)
+    X = actions[["start_x", "start_y", "end_x", "end_y"]].to_numpy(dtype=float)
     inliers = LocalOutlierFactor(contamination="auto").fit_predict(X)
     if verbose:
-        print(f"Remove {(inliers==-1).sum()} out of {X.shape[0]} datapoints.")
-    return actions[inliers==1]
+        print(f"Remove {(inliers == -1).sum()} out of {X.shape[0]} datapoints.")
+    return actions[inliers == 1]
+
+    # def _initialize(self, X: np.ndarray, sample_weight: np.ndarray):
+    #     X = np.asarray(X, dtype=float)
+    #     n_samples = X.shape[0]
+    #     posteriors = np.zeros((n_samples, self.n_components), dtype=X.dtype)
+    #     random_state = np.random.RandomState(42)
+    #     match self._init:
+    #         case "k-means++":
+    #             _, indices = kmeans_plusplus(
+    #                 X,
+    #                 self.n_components,
+    #                 random_state=random_state,
+    #                 sample_weight=sample_weight
+    #             )
+    #             posteriors[indices, np.arange(self.n_components)] = 1.0
+    #
+    #             # if K-Means fails, do random initialization.
+    #             zeros = np.equal(posteriors.sum(axis=0), 0)
+    #             if ~np.any(zeros):
+    #                 for j, dist in enumerate(self._components):
+    #                     dist.fit(X, weights=posteriors[:, j] * sample_weight)
+    #                 self._weights = posteriors.sum(axis=0) + 10 * np.finfo(posteriors.dtype).eps
+    #                 self._weights /= self._weights.sum()
+    #             else:
+    #                 for dist in self._components:
+    #                     dist.fit(X, weights=random_state.random(n_samples) * sample_weight)
+    #                 rand_values = random_state.random(self.n_components)
+    #                 self._weights = (rand_values + 10 * np.finfo(posteriors.dtype).eps)
+    #                 self._weights /= self._weights.sum()
+    #
+    #         case "k-means":
+    #             labels = KMeans(
+    #                 n_clusters=self.n_components,
+    #                 init='k-means++',
+    #                 n_init=1,
+    #                 max_iter=100,
+    #                 random_state=random_state,
+    #                 sample_weight=sample_weight
+    #             ).fit_predict(X)
+    #             posteriors[np.arange(n_samples), labels] = 1.0  # as in hard clustering
+    #
+    #             # if K-Means fails, do random initialization.
+    #             zeros = np.equal(posteriors.sum(axis=0), 0)
+    #             if ~np.any(zeros):
+    #                 for j, dist in enumerate(self._components):
+    #                     dist.fit(X, weights=posteriors[:, j] * sample_weight)
+    #                 self._weights = (posteriors.sum(axis=0) + 10 * np.finfo(posteriors.dtype).eps)
+    #                 self._weights /= self._weights.sum()
+    #             else:
+    #                 for dist in self._components:
+    #                     dist.fit(X, weights=random_state.random(n_samples) * sample_weight)
+    #                 rand_values = random_state.random(self.n_components)
+    #                 self._weights = (rand_values + 10 * np.finfo(posteriors.dtype).eps)
+    #                 self._weights /= self._weights.sum()
+    #
+    #         case "random":
+    #             for dist in self._components:
+    #                 dist.fit(X, weights=random_state.random(n_samples) * sample_weight)
+    #             rand_values = random_state.random(self.n_components)
+    #             self._weights = (rand_values + 10 * np.finfo(posteriors.dtype).eps)
+    #             self._weights /= self._weights.sum()
+    #
+    #         case "random_from_data":
+    #             indices = random_state.choice(
+    #                 n_samples, size=self.n_components, replace=False
+    #             )
+    #             posteriors[indices, np.arange(self.n_components)] = 1.0
+    #             for j, dist in enumerate(self._components):
+    #                 dist.fit(X, weights=posteriors[:, j] * sample_weight)
+    #             self._weights = posteriors.sum(axis=0) + 10 * np.finfo(posteriors.dtype).eps
+    #             self._weights /= self._weights.sum()
+    #
+    #         case _:
+    #             raise ValueError("Undefined init method.")
+    #
+    #     self._is_initialized = True

@@ -66,7 +66,7 @@ def polar(ax):
 #################################
 
 
-def show_location_model(loc_model: sc.MixtureModel, show=True, figsize=6):
+def show_location_model(loc_model: sc.MixtureModel, show=True, figsize=6, title=None):
     ax = mps.field(show=False, figsize=figsize)
 
     norm_strengths = loc_model.get_weights() / np.max(loc_model.get_weights()) * 0.8
@@ -74,12 +74,14 @@ def show_location_model(loc_model: sc.MixtureModel, show=True, figsize=6):
         mean, cov = gauss.params
         add_ellips(ax, mean, cov, color=color, alpha=strength)
     if show:
+        if title is not None:
+            plt.title(title)
         plt.show()
     else:
         return ax
         
 
-def show_direction_model(gauss: sc.MultivariateGaussian, dir_models: sc.MixtureModel, show=True, figsize=6):
+def show_direction_model(gauss: sc.MultivariateGaussian, dir_models: sc.MixtureModel, show=True, figsize=6, title=None):
     ax = mps.field(show=False, figsize=figsize)
     # for gauss in loc_model.submodels:
     mean, cov = gauss.params
@@ -93,6 +95,8 @@ def show_direction_model(gauss: sc.MultivariateGaussian, dir_models: sc.MixtureM
         add_arrow(ax, x, y, 10*dx, 10*dy,
             linewidth=0.5)
     if show:
+        if title is not None:
+            plt.title(title)
         plt.show()
 
 
@@ -108,14 +112,15 @@ def show_location_models(loc_models: list[sc.MixtureModel], figsize=6):
 def show_all_models(loc_model: sc.MixtureModel,
                     dir_models: list[sc.MixtureModel],
                     figsize: float = 6,
-                    arrow_scale: float = 12.0):
+                    arrow_scale: float = 12.0,
+                    title: str = None):
     """
     Plot every (Gaussian + VonMises arrows) on one shared Axes,
     using a different color per cluster, and arrow lengths ∝ mean length r.
     """
     ax = mps.field(show=False, figsize=figsize)
 
-    n = loc_model.n_clusters
+    n = loc_model.n_components
     palette = colors * ((n // len(colors)) + 1)
 
     for i, (gauss, vmm) in enumerate(zip(loc_model.get_components(),
@@ -135,6 +140,43 @@ def show_all_models(loc_model: sc.MixtureModel,
                       length * dx,
                       length * dy,
                       linewidth=0.8)
+    if title is not None:
+        plt.title(title)
+    plt.show()
+
+def show_all_models_ax(loc_model: sc.MixtureModel,
+                    dir_models: list[sc.MixtureModel],
+                    figsize: float = 6,
+                    arrow_scale: float = 12.0,
+                    title: str = None):
+    """
+    Plot every (Gaussian + VonMises arrows) on one shared Axes,
+    using a different color per cluster, and arrow lengths ∝ mean length r.
+    """
+    ax = mps.field(show=False, figsize=figsize)
+
+    n = loc_model.n_components
+    palette = colors * ((n // len(colors)) + 1)
+
+    for i, (gauss, vmm) in enumerate(zip(loc_model.get_components(),
+                                         dir_models)):
+        col = palette[i]
+        mean, cov = gauss.params
+        add_ellips(ax, mean, cov, color=col, alpha=0.5)
+        x0, y0 = mean
+
+        for vonm in vmm.get_components():
+            loc, _ = vonm.params
+            r = vonm.mean_length  # in [0, 1]
+            length = arrow_scale * r  # scale accordingly
+            dx, dy = np.cos(loc), np.sin(loc)
+            add_arrow(ax,
+                      x0, y0,
+                      length * dx,
+                      length * dy,
+                      linewidth=0.8)
+    if title is not None:
+        plt.title(title)
     plt.show()
         
 
