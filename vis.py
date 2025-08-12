@@ -142,6 +142,8 @@ def show_all_models(loc_model: sc.MixtureModel,
                       linewidth=0.8)
     if title is not None:
         plt.title(title)
+
+    #plt.savefig(f"plots/model_{title}.pdf", bbox_inches='tight')
     plt.show()
 
 def show_all_models_ax(loc_model: sc.MixtureModel,

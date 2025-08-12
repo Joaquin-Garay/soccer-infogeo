@@ -468,8 +468,13 @@ class VonMises(ExponentialFamily):
         self._dual_param = eta
         self._loc = np.arctan2(eta[1], eta[0])
         # A(kappa=100) = 0.9948
-        self._A = np.minimum(np.sqrt(np.inner(eta, eta)), 0.9485998259548459)  # such that kappa <= 10.0
-        self._kappa = self._inv_mean_length(self._A)
+        A = np.sqrt(np.inner(eta, eta))
+        if A >= 0.9485998259548459:
+            self._A = 0.9485998259548459
+            self._kappa = 10.0
+        else:
+            self._A = A
+            self._kappa = self._inv_mean_length(A)
         self._validate()
         self._natural_param = np.array([self._kappa * np.cos(self._loc),
                                         self._kappa * np.sin(self._loc)])
@@ -640,9 +645,9 @@ class MixtureModel:
             case "k-means":
                 labels = KMeans(
                     n_clusters=self.n_components,
-                    init="k-means++",
-                    n_init=1,
-                    max_iter=100,
+                    init="random",
+                    n_init=10,
+                    max_iter=10,
                     random_state=rng,
                    #sample_weight=sample_weight,
                 ).fit_predict(X)
