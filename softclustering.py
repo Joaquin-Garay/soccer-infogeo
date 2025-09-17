@@ -381,20 +381,19 @@ class VonMises(ExponentialFamily):
         self._natural_param = None
         self._dual_param = None
         self._A = None
+        self._MAX_KAPPA = 50.0
+        self._MAX_A = self._mean_length(self._MAX_KAPPA) #A(50) = 0.9899489673784978
         self._validate()
         self._update_params()
 
-    @staticmethod
-    def _mean_length(kappa):
-        kappa = np.clip(kappa, 1e-6, 100.0)
+    def _mean_length(self, kappa):
+        kappa = np.clip(kappa, 1e-6, self._MAX_KAPPA)
         return i1e(kappa) / i0e(kappa)
 
     @staticmethod
     def _inv_mean_length(r: float):
         """
         A^{-1} approximation given by Best and Fisher (1981).
-        :param r:
-        :return:
         """
         if r < 0.53:
             return 2 * r + r ** 3 + (5 * r ** 5) / 6
@@ -402,6 +401,13 @@ class VonMises(ExponentialFamily):
             return -0.4 + 1.39 * r + 0.43 / (1 - r)
         else:
             return 1 / (r ** 3 - 4 * r ** 2 + 3 * r)
+
+    @staticmethod
+    def _inv_mean_length_v2(r: float):
+        """
+        A^{-1} approximation given by Barnejee (2005).
+        """
+        return r * (2- r**2) / (1-r**2)
 
     def _validate(self):
         if self._kappa <= 0:
@@ -452,8 +458,7 @@ class VonMises(ExponentialFamily):
             raise ValueError("natural_param must be a length-2 vector.")
         self._natural_param = theta
         self._loc = np.arctan2(theta[1], theta[0])
-        # A(kappa=10) = 0.948599
-        self._kappa = np.minimum(np.sqrt(np.inner(theta, theta)), 10.0)
+        self._kappa = np.minimum(np.linalg.norm(theta,ord=None), self._MAX_KAPPA)
         self._A = self._mean_length(self._kappa)
         self._validate()
         self._dual_param = np.array([self._A * np.cos(self._loc),
@@ -467,14 +472,8 @@ class VonMises(ExponentialFamily):
     def dual_param(self, eta: np.ndarray):
         self._dual_param = eta
         self._loc = np.arctan2(eta[1], eta[0])
-        # A(kappa=100) = 0.9948
-        A = np.sqrt(np.inner(eta, eta))
-        if A >= 0.9485998259548459:
-            self._A = 0.9485998259548459
-            self._kappa = 10.0
-        else:
-            self._A = A
-            self._kappa = self._inv_mean_length(A)
+        self._A = np.minimum(np.linalg.norm(eta, ord=None), self._MAX_A)
+        self._kappa = self._inv_mean_length(self._A)
         self._validate()
         self._natural_param = np.array([self._kappa * np.cos(self._loc),
                                         self._kappa * np.sin(self._loc)])
@@ -496,7 +495,7 @@ class VonMises(ExponentialFamily):
             eta = eta[np.newaxis, :]
 
         loc = np.arctan2(eta[:, 1], eta[:, 0])  # shape (n,)
-        A = np.minimum(np.linalg.norm(eta, axis=1), 0.9485998259548459)
+        A = np.minimum(np.linalg.norm(eta, axis=1), 0.9899489673784978) #A(50) = 0.9899489673784978
 
         # vectorized Best–Fisher inversion:
         #   if A<0.53: 2A + A^3 + 5A^5/6
@@ -540,13 +539,19 @@ class VonMises(ExponentialFamily):
             case "bregman":
                 # compute dual/expectation parameters using sufficient statistics.
                 eta = np.average(X, axis=0, weights=sample_weight)
-                self.dual_param = eta
+                #self.dual_param = eta
+                loc = np.arctan2(eta[1], eta[0])
+                R = np.minimum(np.linalg.norm(eta, ord=None), self._MAX_A)
+                kappa = self._inv_mean_length(R)
+
+                self._loc, self._kappa = loc, kappa
+                self._validate()
+                self._update_params()
             case "approximation":
-                C = np.sum(sample_weight * X[:, 0])
-                S = np.sum(sample_weight * X[:, 1])
-                loc = np.arctan2(S, C)
-                R = np.minimum(np.sqrt(C * C + S * S), 0.9485998259548459)
-                kappa = R * (2 - R * R) / (1 - R * R)
+                eta = np.average(X, axis=0, weights=sample_weight)
+                loc = np.arctan2(eta[1], eta[0])
+                R = np.minimum(np.linalg.norm(eta, ord=None), self._MAX_A)
+                kappa = self._inv_mean_length_v2(R)
 
                 self._loc, self._kappa = loc, kappa
                 self._validate()
@@ -569,7 +574,7 @@ class VonMises(ExponentialFamily):
                 C = np.sum(sample_weight * X[:, 0])
                 S = np.sum(sample_weight * X[:, 1])
                 initials = np.array([np.arctan2(S, C), self._kappa])
-                bnds = ((-np.pi, np.pi), (1e-8, 10.0))
+                bnds = ((-np.pi, np.pi), (1e-6, 50.0))
                 result = minimize(
                     fun=neg_ll,
                     x0=initials,
@@ -702,8 +707,12 @@ class MixtureModel:
         return np.column_stack([c.log_pdf(X) for c in self._components])
 
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
+        """
+        Return log p(x)
+        Shape: (N,)
+        """
         X = np.asarray(X, dtype=float)
-        log_pi = np.log(self._weights)
+        log_pi = np.log(self._weights) # (K,)
         return logsumexp(self.log_pdf_components(X) + log_pi, axis=1)
 
     def pdf(self, X):
@@ -724,7 +733,7 @@ class MixtureModel:
         expected_log_likelihood = np.sum(log_numerator * posterior)
         return posterior, log_likelihood, expected_log_likelihood
 
-    def fit_em(self, X, sample_weight=None, tol=1e-8, max_iter=1000, verbose=False, case="classic"):
+    def fit_em(self, X, sample_weight=None, tol=1e-4, max_iter=1000, verbose=False, case="classic"):
         X = np.asarray(X, dtype=float)
         N = X.shape[0]
         if sample_weight is None:
@@ -847,6 +856,19 @@ class MixtureModel:
         if lines:
             lines[-1] = lines[-1].replace("├─", "└─", 1)
         return "\n".join([header, *lines])
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def two_layer_scheme(loc_data: np.ndarray,
