@@ -5,7 +5,6 @@ from scipy.optimize import minimize
 from scipy.special import i0e, i1e, logsumexp
 from sklearn.cluster import KMeans, kmeans_plusplus
 from sklearn.exceptions import ConvergenceWarning
-from sklearn.neighbors import LocalOutlierFactor
 
 
 # -------------------- Base --------------------
@@ -16,6 +15,7 @@ class ExponentialFamily(ABC):
     @abstractmethod
     def log_pdf(self, X: np.ndarray) -> np.ndarray:
         """Return log-density log p(X)."""
+        pass
 
     def pdf(self, X: np.ndarray) -> np.ndarray:
         """Default pdf via exp(log_pdf)."""
@@ -778,7 +778,7 @@ class MixtureModel:
         p = self.n_components - 1
         for param in dist_params:
             if isinstance(param, float):
-                p += 1
+                p += 1 * self.n_components
             else:
                 p += param.size * self.n_components
         return np.log(X.shape[0]) * p - 2 * ll
@@ -858,19 +858,6 @@ class MixtureModel:
         return "\n".join([header, *lines])
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 def two_layer_scheme(loc_data: np.ndarray,
                      dir_data: np.ndarray,
                      K_loc: int,
@@ -919,122 +906,4 @@ def two_layer_scheme(loc_data: np.ndarray,
     return gmm, vmmm_list
 
 
-def consolidate(actions):
-    # actions.fillna(0, inplace=True)
 
-    # Consolidate corner_short and corner_crossed
-    corner_idx = actions.type_name.str.contains("corner")
-    actions["type_name"] = actions["type_name"].mask(corner_idx, "corner")
-
-    # Consolidate freekick_short, freekick_crossed, and shot_freekick
-    freekick_idx = actions.type_name.str.contains("freekick")
-    actions["type_name"] = actions["type_name"].mask(freekick_idx, "freekick")
-
-    # Consolidate keeper_claim, keeper_punch, keeper_save, keeper_pick_up
-    keeper_idx = actions.type_name.str.contains("keeper")
-    actions["type_name"] = actions["type_name"].mask(keeper_idx, "keeper_action")
-
-    actions["start_x"] = actions["start_x"].mask(actions.type_name == "shot_penalty", 94.5)
-    actions["start_y"] = actions["start_y"].mask(actions.type_name == "shot_penalty", 34)
-
-    return actions
-
-
-def add_noise(actions):
-    # Start locations
-    start_list = ["cross", "shot", "dribble", "pass", "keeper_action", "clearance", "goalkick"]
-    mask = actions["type_name"].isin(start_list)
-    noise = np.random.normal(0, 0.5, size=actions.loc[mask, ["start_x", "start_y"]].shape)
-    actions.loc[mask, ["start_x", "start_y"]] += noise
-
-    # End locations
-    end_list = ["cross", "shot", "dribble", "pass", "keeper_action", "throw_in", "corner", "freekick", "shot_penalty"]
-    mask = actions["type_name"].isin(end_list)
-    noise = np.random.normal(0, 0.5, size=actions.loc[mask, ["end_x", "end_y"]].shape)
-    actions.loc[mask, ["end_x", "end_y"]] += noise
-
-    return actions
-
-
-def remove_outliers(actions, verbose=False):
-    X = actions[["start_x", "start_y", "end_x", "end_y"]].to_numpy(dtype=float)
-    inliers = LocalOutlierFactor(contamination="auto").fit_predict(X)
-    if verbose:
-        print(f"Remove {(inliers == -1).sum()} out of {X.shape[0]} datapoints.")
-    return actions[inliers == 1]
-
-    # def _initialize(self, X: np.ndarray, sample_weight: np.ndarray):
-    #     X = np.asarray(X, dtype=float)
-    #     n_samples = X.shape[0]
-    #     posteriors = np.zeros((n_samples, self.n_components), dtype=X.dtype)
-    #     random_state = np.random.RandomState(42)
-    #     match self._init:
-    #         case "k-means++":
-    #             _, indices = kmeans_plusplus(
-    #                 X,
-    #                 self.n_components,
-    #                 random_state=random_state,
-    #                 sample_weight=sample_weight
-    #             )
-    #             posteriors[indices, np.arange(self.n_components)] = 1.0
-    #
-    #             # if K-Means fails, do random initialization.
-    #             zeros = np.equal(posteriors.sum(axis=0), 0)
-    #             if ~np.any(zeros):
-    #                 for j, dist in enumerate(self._components):
-    #                     dist.fit(X, weights=posteriors[:, j] * sample_weight)
-    #                 self._weights = posteriors.sum(axis=0) + 10 * np.finfo(posteriors.dtype).eps
-    #                 self._weights /= self._weights.sum()
-    #             else:
-    #                 for dist in self._components:
-    #                     dist.fit(X, weights=random_state.random(n_samples) * sample_weight)
-    #                 rand_values = random_state.random(self.n_components)
-    #                 self._weights = (rand_values + 10 * np.finfo(posteriors.dtype).eps)
-    #                 self._weights /= self._weights.sum()
-    #
-    #         case "k-means":
-    #             labels = KMeans(
-    #                 n_clusters=self.n_components,
-    #                 init='k-means++',
-    #                 n_init=1,
-    #                 max_iter=100,
-    #                 random_state=random_state,
-    #                 sample_weight=sample_weight
-    #             ).fit_predict(X)
-    #             posteriors[np.arange(n_samples), labels] = 1.0  # as in hard clustering
-    #
-    #             # if K-Means fails, do random initialization.
-    #             zeros = np.equal(posteriors.sum(axis=0), 0)
-    #             if ~np.any(zeros):
-    #                 for j, dist in enumerate(self._components):
-    #                     dist.fit(X, weights=posteriors[:, j] * sample_weight)
-    #                 self._weights = (posteriors.sum(axis=0) + 10 * np.finfo(posteriors.dtype).eps)
-    #                 self._weights /= self._weights.sum()
-    #             else:
-    #                 for dist in self._components:
-    #                     dist.fit(X, weights=random_state.random(n_samples) * sample_weight)
-    #                 rand_values = random_state.random(self.n_components)
-    #                 self._weights = (rand_values + 10 * np.finfo(posteriors.dtype).eps)
-    #                 self._weights /= self._weights.sum()
-    #
-    #         case "random":
-    #             for dist in self._components:
-    #                 dist.fit(X, weights=random_state.random(n_samples) * sample_weight)
-    #             rand_values = random_state.random(self.n_components)
-    #             self._weights = (rand_values + 10 * np.finfo(posteriors.dtype).eps)
-    #             self._weights /= self._weights.sum()
-    #
-    #         case "random_from_data":
-    #             indices = random_state.choice(
-    #                 n_samples, size=self.n_components, replace=False
-    #             )
-    #             posteriors[indices, np.arange(self.n_components)] = 1.0
-    #             for j, dist in enumerate(self._components):
-    #                 dist.fit(X, weights=posteriors[:, j] * sample_weight)
-    #             self._weights = posteriors.sum(axis=0) + 10 * np.finfo(posteriors.dtype).eps
-    #             self._weights /= self._weights.sum()
-    #
-    #         case _:
-    #             raise ValueError("Undefined init method.")
-    #
-    #     self._is_initialized = True

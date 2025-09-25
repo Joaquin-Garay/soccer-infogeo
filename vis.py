@@ -221,18 +221,10 @@ def show_direction_models(loc_models, dir_models, figsize=8):
 
 
 def add_ellips(ax, mean, covar, color=None, alpha=0.7):
-    # eigen‑decomposition
     eigvals, eigvecs = linalg.eigh(covar)
-    # 2sigma lengths along principal axes
     lengths = 2.0 * np.sqrt(2.0) * np.sqrt(eigvals)
-
-    # principal direction = first eigenvector
     direction = eigvecs[:, 0] / np.linalg.norm(eigvecs[:, 0])
-
-    # compute angle in degrees
     angle = np.degrees(np.arctan2(direction[1], direction[0]))
-
-    # enforce a minimum size so it’s always visible
     width, height = max(lengths[0], 3), max(lengths[1], 3)
 
     ell = mpl.patches.Ellipse(
