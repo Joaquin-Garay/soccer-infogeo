@@ -69,8 +69,8 @@ def polar(ax):
 def show_location_model(loc_model: sc.MixtureModel, show=True, figsize=6, title=None):
     ax = mps.field(show=False, figsize=figsize)
 
-    norm_strengths = loc_model.get_weights() / np.max(loc_model.get_weights()) * 0.8
-    for strength, gauss, color in zip(norm_strengths, loc_model.get_components(), colors * 10):
+    norm_strengths = loc_model.weights / np.max(loc_model.weights) * 0.8
+    for strength, gauss, color in zip(norm_strengths, loc_model.components, colors * 10):
         mean, cov = gauss.params
         add_ellips(ax, mean, cov, color=color, alpha=strength)
     if show:
@@ -87,7 +87,7 @@ def show_direction_model(gauss: sc.MultivariateGaussian, dir_models: sc.MixtureM
     mean, cov = gauss.params
     add_ellips(ax, mean, cov, alpha=0.5)
     x, y = mean
-    for vonmises in dir_models.get_components():
+    for vonmises in dir_models.components:
         loc, kappa = vonmises.params
         r = vonmises.mean_length
         dx = np.cos(loc)
@@ -123,14 +123,14 @@ def show_all_models(loc_model: sc.MixtureModel,
     n = loc_model.n_components
     palette = colors * ((n // len(colors)) + 1)
 
-    for i, (gauss, vmm) in enumerate(zip(loc_model.get_components(),
+    for i, (gauss, vmm) in enumerate(zip(loc_model.components,
                                          dir_models)):
         col = palette[i]
         mean, cov = gauss.params
         add_ellips(ax, mean, cov, color=col, alpha=0.5)
         x0, y0 = mean
 
-        for vonm in vmm.get_components():
+        for vonm in vmm.components:
             loc, _ = vonm.params
             r = vonm.mean_length  # in [0, 1]
             length = arrow_scale * r  # scale accordingly
@@ -160,14 +160,14 @@ def show_all_models_ax(loc_model: sc.MixtureModel,
     n = loc_model.n_components
     palette = colors * ((n // len(colors)) + 1)
 
-    for i, (gauss, vmm) in enumerate(zip(loc_model.get_components(),
+    for i, (gauss, vmm) in enumerate(zip(loc_model.components,
                                          dir_models)):
         col = palette[i]
         mean, cov = gauss.params
         add_ellips(ax, mean, cov, color=col, alpha=0.5)
         x0, y0 = mean
 
-        for vonm in vmm.get_components():
+        for vonm in vmm.components:
             loc, _ = vonm.params
             r = vonm.mean_length  # in [0, 1]
             length = arrow_scale * r  # scale accordingly
