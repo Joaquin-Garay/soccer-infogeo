@@ -582,6 +582,7 @@ class CustomBregman(ExponentialFamily):
         return self._gaussian.dual_param, self._vonmises.dual_param, self._coef_gauss, self._coef_vm
 
     def log_pdf(self, X: np.ndarray):
+        #TODO: Need to normalize this pdf to integrate one.
         X_gauss = np.asarray(X, dtype=float)[:, :2]
         X_vm = np.asarray(X, dtype=float)[:, 2:]
         log_gauss = self._gaussian.log_pdf(X_gauss)

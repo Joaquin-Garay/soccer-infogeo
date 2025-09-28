@@ -1,7 +1,58 @@
 #utils.py
-import pandas as pd
+"""
+Auxiliary functions
+"""
+
+from scipy import linalg
 import numpy as np
+import matplotlib as mpl
+import matplotsoccer as mps
+
+import pandas as pd
 from sklearn.neighbors import LocalOutlierFactor
+
+def add_ellips(ax, mean, covar, color=None, alpha=0.7):
+    eigvals, eigvecs = linalg.eigh(covar)
+    lengths = 2.0 * np.sqrt(2.0) * np.sqrt(eigvals)
+    direction = eigvecs[:, 0] / np.linalg.norm(eigvecs[:, 0])
+    angle = np.degrees(np.arctan2(direction[1], direction[0]))
+    width, height = max(lengths[0], 3), max(lengths[1], 3)
+
+    ell = mpl.patches.Ellipse(
+        xy=mean,
+        width=width,
+        height=height,
+        angle=angle,
+        facecolor=color,  # or edgecolor=color
+        alpha=alpha
+    )
+    ax.add_patch(ell)
+    return ax
+
+
+def add_arrow(ax, x, y, dx, dy,
+              arrowsize=2.5,
+              linewidth=2.0,
+              threshold=1.8,
+              alpha=1.0,
+              fc='grey',
+              ec='grey'):
+    """
+    Draw an arrow only if its dx or dy exceed the threshold,
+    with both facecolor and edgecolor set to grey by default.
+    """
+    if np.sqrt(dx ** 2 + dy ** 2) > threshold:
+        return ax.arrow(
+            x, y, dx, dy,
+            head_width=arrowsize,
+            head_length=arrowsize,
+            linewidth=linewidth,
+            fc=fc,
+            ec=ec,
+            length_includes_head=True,
+            alpha=alpha,
+            zorder=3,
+        )
 
 def consolidate(actions):
     # actions.fillna(0, inplace=True)

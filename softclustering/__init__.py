@@ -5,7 +5,7 @@ from .distributions import (
     UnivariateGaussian,
     MultivariateGaussian,
     VonMises,
-    CustomBregman
+    CustomBregman,
 )
 
 from .mixture import (
@@ -13,10 +13,10 @@ from .mixture import (
 )
 
 from .models import (
-    TwoLayerScheme
+    TwoLayerScheme,
+    OneShotScheme,
 )
 
-# If you expose any metrics publicly, export them too:
 from .metrics import (
     kl_div_univariate_gaussian,
     kl_div_multivariate_gaussian,
@@ -45,5 +45,6 @@ __all__ = [
     "hard_predict",
     "kl_ch_score",
     # models
-    "TwoLayerScheme"
+    "TwoLayerScheme",
+    "OneShotScheme",
 ]

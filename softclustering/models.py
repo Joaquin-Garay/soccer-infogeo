@@ -1,4 +1,4 @@
-#models.py
+# models.py
 
 """
 Models
@@ -8,19 +8,17 @@ from __future__ import annotations
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
-import warnings
-from abc import ABC, abstractmethod
-from scipy.optimize import minimize
-from scipy.special import i0e, i1e, logsumexp
-from sklearn.cluster import KMeans, kmeans_plusplus
-from sklearn.exceptions import ConvergenceWarning
-from sklearn.neighbors import LocalOutlierFactor
 
-from .distributions import ExponentialFamily
+from scipy.special import logsumexp
+
+from .distributions import ExponentialFamily, CustomBregman
 from .mixture import MixtureModel
 from .metrics import _num_free_params_for_component
+from .utils import (
+    add_ellips,
+    add_arrow,
+)
 
-from scipy import linalg
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import matplotsoccer as mps
@@ -69,6 +67,9 @@ class TwoLayerScheme:
         for j in range(self.loc_n_clusters):
             _ = self.dir_mixtures[j].fit(dir_data,
                                          sample_weight=loc_posteriors[:, j],
+                                         tol=tol,
+                                         max_iter=max_iter,
+                                         verbose=verbose,
                                          case=case)
 
     def log_pdf(self, loc_data: np.ndarray, dir_data: np.ndarray) -> np.ndarray:
@@ -100,7 +101,11 @@ class TwoLayerScheme:
         ll = self.log_pdf(loc_data, dir_data).sum()
         return np.log(loc_data.shape[0]) * p - 2 * ll
 
-    def plot(self, figsize: float = 6, arrow_scale: float = 12.0, title: str = None, save: bool = False):
+    def plot(self,
+             figsize: float = 6,
+             arrow_scale: float = 12.0,
+             title: str = None,
+             save: bool = False):
         """
         Plot every (Gaussian + VonMises arrows) on one shared Axes,
         using a different color per cluster, and arrow lengths proportional to mean length r.
@@ -111,7 +116,7 @@ class TwoLayerScheme:
         palette = colors * ((n // len(colors)) + 1)
 
         for i, (loc, direction) in enumerate(zip(self.loc_mixture.components,
-                                           self.dir_mixtures)):
+                                                 self.dir_mixtures)):
             col = palette[i]
             mean, cov = loc.params
             add_ellips(ax, mean, cov, color=col, alpha=0.5)
@@ -133,45 +138,66 @@ class TwoLayerScheme:
         plt.show()
 
 
-def add_ellips(ax, mean, covar, color=None, alpha=0.7):
-    eigvals, eigvecs = linalg.eigh(covar)
-    lengths = 2.0 * np.sqrt(2.0) * np.sqrt(eigvals)
-    direction = eigvecs[:, 0] / np.linalg.norm(eigvecs[:, 0])
-    angle = np.degrees(np.arctan2(direction[1], direction[0]))
-    width, height = max(lengths[0], 3), max(lengths[1], 3)
+# ---- One-shot Scheme ----
+class OneShotScheme():
+    def __init__(self,
+                 n_clusters: int,
+                 alpha: float,
+                 beta: float,
+                 init: str = 'k-means++'):
+        self._components = [CustomBregman(alpha, beta) for _ in range(n_clusters)]
+        self.n_components = n_clusters
+        self._mixture = MixtureModel(self._components,
+                                     weights=None,
+                                     init=init)
 
-    ell = mpl.patches.Ellipse(
-        xy=mean,
-        width=width,
-        height=height,
-        angle=angle,
-        facecolor=color,  # or edgecolor=color
-        alpha=alpha
-    )
-    ax.add_patch(ell)
-    return ax
+    def fit(self,
+            loc_data: np.ndarray,
+            dir_data: np.ndarray,
+            sample_weight=None,
+            tol: float = 1e-4,
+            max_iter: int = 1000,
+            verbose: bool = False):
+        X = np.concatenate([loc_data, dir_data], axis=1)
 
+        _ = self._mixture.fit(X,
+                              sample_weight=None,
+                              tol=tol,
+                              max_iter=max_iter,
+                              verbose=verbose,
+                              case='bregman')
 
-def add_arrow(ax, x, y, dx, dy,
-              arrowsize=2.5,
-              linewidth=2.0,
-              threshold=1.8,
-              alpha=1.0,
-              fc='grey',
-              ec='grey'):
-    """
-    Draw an arrow only if its dx or dy exceed the threshold,
-    with both facecolor and edgecolor set to grey by default.
-    """
-    if np.sqrt(dx ** 2 + dy ** 2) > threshold:
-        return ax.arrow(
-            x, y, dx, dy,
-            head_width=arrowsize,
-            head_length=arrowsize,
-            linewidth=linewidth,
-            fc=fc,
-            ec=ec,
-            length_includes_head=True,
-            alpha=alpha,
-            zorder=3,
-        )
+    def bic_score(self, loc_data, dir_data):
+        X = np.concatenate([loc_data, dir_data], axis=1)
+        ll = self._mixture.log_pdf(X).sum()
+        n_params = (2 + 3 + 2) * self.n_components  # 2 + 3 for the Gaussian; 2 for the von Mises
+        n_params += 2  # alpha and beta
+        return np.log(X.shape[0]) * n_params - 2 * ll
+
+    def plot(self, figsize: float = 6, arrow_scale: float = 12.0, title: str = None, save: bool = False):
+        ax = mps.field(show=False, figsize=figsize)
+
+        n = self.n_components
+        palette = colors * ((n // len(colors)) + 1)
+        for i, cluster in enumerate(self._mixture.components):
+            gauss = cluster.gaussian
+            vonmises = cluster.vonmises
+
+            col = palette[i]
+            mean, cov = gauss.params
+            add_ellips(ax, mean, cov, color=col, alpha=0.5)
+            x0, y0 = mean
+
+            loc, _ = vonmises.params
+            r = vonmises.mean_length  # in [0, 1]
+            length = arrow_scale * r  # scale accordingly
+            dx, dy = np.cos(loc), np.sin(loc)
+            add_arrow(ax, x0, y0,
+                      length * dx, length * dy,
+                      linewidth=0.8)
+
+        if title is not None:
+            plt.title(title)
+        if save:
+            plt.savefig(f"plots/model_{title}.pdf", bbox_inches='tight')
+        plt.show()
