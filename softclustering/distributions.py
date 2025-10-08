@@ -582,12 +582,29 @@ class CustomBregman(ExponentialFamily):
         return self._gaussian.dual_param, self._vonmises.dual_param, self._coef_gauss, self._coef_vm
 
     def log_pdf(self, X: np.ndarray):
-        #TODO: Need to normalize this pdf to integrate one.
         X_gauss = np.asarray(X, dtype=float)[:, :2]
         X_vm = np.asarray(X, dtype=float)[:, 2:]
-        log_gauss = self._gaussian.log_pdf(X_gauss)
-        log_vm = self._vonmises.log_pdf(X_vm)
-        return self._coef_gauss * log_gauss + self._coef_vm * log_vm
+
+        alpha = self._coef_gauss
+        beta = self._coef_vm
+        log_2pi = np.log(2 * np.pi)
+
+        # Gaussian
+        mean, cov = self._gaussian.params
+        d = self._gaussian.d
+        chol = np.linalg.cholesky(cov)
+        log_det = 2 * np.sum(np.log(np.diag(chol)))
+        log_gauss_normalizer = 0.5 * (d * np.log(alpha)
+                                      - d * (1 - alpha) * log_2pi
+                                      - (1 - alpha) * log_det)
+        # Von Mises
+        _, kappa = self._vonmises.params
+        log_vm_normalizer = (beta - 1) * log_2pi + beta * np.log(i0e(kappa)) + kappa \
+                            - np.log(i0e(beta * kappa)) - beta * kappa
+
+        log_pdf_gauss_alpha = alpha * self._gaussian.log_pdf(X_gauss) + log_gauss_normalizer
+        log_pdf_vm_beta = beta * self._vonmises.log_pdf(X_vm) + log_vm_normalizer
+        return log_pdf_gauss_alpha + log_pdf_vm_beta
 
     def fit(self,
             X: np.ndarray,
