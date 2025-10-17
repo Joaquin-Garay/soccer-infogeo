@@ -76,11 +76,12 @@ class TwoLayerScheme:
         """
         Returns log p(x). Shape: (N,)
         """
-        loc_posteriors = self.loc_mixture.get_posteriors(loc_data) + _EPS  # (N,K)
+        loc_pdf = self.loc_mixture.get_posteriors(loc_data) + _EPS  # (N,K)
+        loc_pdf *= self.loc_mixture.pdf(loc_data)[:,None]
         dir_log_pdf_array = [self.dir_mixtures[k].log_pdf(dir_data)[:, None]  # (N,1)
                              for k in range(self.loc_n_clusters)]
         dir_log_pdf = np.concatenate(dir_log_pdf_array, axis=1)  # (N,K)
-        return logsumexp(np.log(loc_posteriors) + dir_log_pdf, axis=1)  # (N,)
+        return logsumexp(np.log(loc_pdf) + dir_log_pdf, axis=1)  # (N,)
 
     def pdf(self, loc_data: np.ndarray, dir_data: np.ndarray) -> np.ndarray:
         return np.exp(self.log_pdf(loc_data, dir_data))
