@@ -27,6 +27,14 @@ from .metrics import (
     kl_ch_score,
 )
 
+from .utils import(
+    add_ellips,
+    add_arrow,
+    consolidate,
+    add_noise,
+    remove_outliers,
+)
+
 __all__ = [
     # distributions
     "ExponentialFamily",
@@ -47,4 +55,10 @@ __all__ = [
     # models
     "TwoLayerScheme",
     "OneShotScheme",
+    # utils
+    "add_ellips",
+    "add_arrow",
+    "consolidate",
+    "add_noise",
+    "remove_outliers",
 ]
