@@ -187,16 +187,16 @@ class MixtureModel:
         """
         # take log to prevent underflow
         eps = np.finfo(float).tiny
-        log_prior = np.log(self._weights + eps)  # (K,)
-        log_p = self.log_pdf_components(X)  # (N, K)
-        log_numerator = log_prior + log_p  # (N, K)
-        log_denominator = logsumexp(log_numerator, axis=1, keepdims=True)  # (N, 1)
-        log_posterior = log_numerator - log_denominator  # (N, K)
+        log_prior = np.log(self._weights + eps)  # (K,) := log prior_j
+        log_p = self.log_pdf_components(X)  # (N, K) := log exp_family(x_i|theta_j)
+        log_numerator = log_prior + log_p  # (N, K) := log prior_j + log exp_family(x_i|theta_j)
+        log_denominator = logsumexp(log_numerator, axis=1, keepdims=True)  # (N, 1) := log (sum_k (prior_k * exp_family(x_i|theta_k)) ) = log p(x_i)
+        log_posterior = log_numerator - log_denominator  # (N, K) := log(posterior_{ij})
         posterior = np.exp(log_posterior)  # responsibilities (N, K)
 
-        log_likelihood = float(log_denominator.sum())
+        log_likelihood = float(log_denominator.sum()) # data log likelihood as sum_i log(sum_j prior_j exp_family(x_i|theta_j))
 
-        expected_log_likelihood = float(np.sum(log_numerator * posterior))
+        expected_log_likelihood = float(np.sum(log_numerator * posterior)) # expected complete-data log-likelihood
 
         return posterior, log_likelihood, expected_log_likelihood, log_denominator.flatten()
 
@@ -225,25 +225,27 @@ class MixtureModel:
 
             # E-step: Compute the posterior
             posterior, _, _, log_likelihood_arr = self._e_step(X)
-            logger.append(float(np.dot(sample_weight, log_likelihood_arr)))
+            logger.append(float(np.dot(sample_weight, log_likelihood_arr))) #sample-weighted data log likelihood
 
-            # M-step: Maximize weighted log-likelihood
+            # M-step: Maximize sample-weighted data log likelihood
             # update priors
             self._weights = np.average(posterior, axis=0, weights=sample_weight)  # (K,)
             # lift the priors when one of them is below 1 basis points
             if np.min(self._weights) <= _EPS:
+                if verbose:
+                    print(f"lifting priors...")
                 self._weights = (self._weights + _EPS) / (1 + self.n_components * _EPS)
             # update distribution parameters
             for j, comp in enumerate(self._components):
                 comp.fit(X, sample_weight=sample_weight * posterior[:, j], case=case)
 
             # verbose
-            if verbose:
-                print(f"Data log-likelihood at iter {it}: {logger[-1]:.2f}")
+            #if verbose:
+            #    print(f"Data log-likelihood at iter {it}: {logger[-1]:.2f}")
             # check convergence
-            if it > 0 and abs(logger[-1] - logger[-2]) < tol:
+            if it > 10 and abs(logger[-1] - logger[-2]) < tol:
                 if verbose:
-                    print(f"Converged at iter {it}: Delta LL={logger[-1] - logger[-2]:.3e}")
+                    print(f"Converged at iter {it}: LL={logger[-1]:.2f}, Delta LL={logger[-1] - logger[-2]:.2e}")
                 break
         else:
             if verbose:

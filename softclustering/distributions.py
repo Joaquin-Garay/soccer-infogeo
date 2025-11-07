@@ -375,12 +375,19 @@ class VonMises(ExponentialFamily):
         """
         A^{-1} approximation given by Best and Fisher (1981).
         """
-        if r < 0.53:
-            return 2 * r + r ** 3 + (5 * r ** 5) / 6
-        elif r < 0.85:
+        if r > 0.85:
+            return 1.0 / (r ** 3 - 4 * r ** 2 + 3 * r)
+        elif r > 0.53:
             return -0.4 + 1.39 * r + 0.43 / (1 - r)
         else:
-            return 1 / (r ** 3 - 4 * r ** 2 + 3 * r)
+            return 2 * r + r ** 3 + (5 / 6) * r ** 5
+
+        # if r < 0.53:
+        #     return 2 * r + r ** 3 + (5/6) * r ** 5
+        # elif r < 0.85:
+        #     return -0.4 + 1.39 * r + 0.43 / (1 - r)
+        # else:
+        #     return 1.0 / (r ** 3 - 4 * r ** 2 + 3 * r)
 
     @staticmethod
     def _inv_mean_length_v2(r: float):
@@ -477,15 +484,18 @@ class VonMises(ExponentialFamily):
         #   if A<0.53: 2A + A^3 + 5A^5/6
         #   elif A<0.85: -0.4 + 1.39A + 0.43/(1−A)
         #   else: 1/(A^3 − 4A^2 + 3A)
-        kappa = np.where(  # shape (n,)
-            A < 0.53,
-            2 * A + A ** 3 + (5 * A ** 5) / 6,
-            np.where(
-                A < 0.85,
-                -0.4 + 1.39 * A + 0.43 / (1 - A),
-                1.0 / (A ** 3 - 4 * A ** 2 + 3 * A)
-            )
-        )
+        kappa = np.empty_like(A, dtype=float)
+
+        m1 = A < 0.53
+        m2 = (A >= 0.53) & (A < 0.85)
+        m3 = ~(m1 | m2)
+
+        a1 = A[m1]
+        kappa[m1] = 2 * a1 + a1 ** 3 + (5 / 6) * a1 ** 5
+        a2 = A[m2]
+        kappa[m2] = -0.4 + 1.39 * a2 + 0.43 / (1 - a2)
+        a3 = A[m3]
+        kappa[m3] = 1.0 / (a3 ** 3 - 4 * a3 ** 2 + 3 * a3)
 
         return loc, kappa  # shape (n,) and (n,)
 
@@ -517,6 +527,7 @@ class VonMises(ExponentialFamily):
                 self._loc, self._kappa = loc, kappa
                 self._validate()
                 self._update_params()
+
             case "approximation":
                 eta = np.average(X, axis=0, weights=sample_weight)
                 loc = np.arctan2(eta[1], eta[0])
