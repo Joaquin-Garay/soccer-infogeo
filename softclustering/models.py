@@ -105,8 +105,10 @@ class TwoLayerScheme:
     def plot(self,
              figsize: float = 6,
              arrow_scale: float = 12.0,
-             title: str = None,
-             save: bool = False):
+             name: str = None,
+             show_title: bool = False,
+             save: bool = False,
+             show: bool = True):
         """
         Plot every (Gaussian + VonMises arrows) on one shared Axes,
         using a different color per cluster, and arrow lengths proportional to mean length r.
@@ -132,11 +134,15 @@ class TwoLayerScheme:
                           length * dx, length * dy,
                           linewidth=0.8)
 
-        if title is not None:
-            plt.title(title)
+        if show_title:
+            plt.title(name)
         if save:
-            plt.savefig(f"plots/model_{title}.pdf", bbox_inches='tight')
-        plt.show()
+            plt.savefig(f"plots/model_{name}.pdf", bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
 
 
 # ---- One-shot Scheme ----
@@ -158,7 +164,10 @@ class OneShotScheme():
             sample_weight=None,
             tol: float = 1e-4,
             max_iter: int = 1000,
-            verbose: bool = False):
+            verbose: bool = False,
+            case: str = "classic",
+            ):
+
         X = np.concatenate([loc_data, dir_data], axis=1)
 
         _ = self._mixture.fit(X,
@@ -166,7 +175,7 @@ class OneShotScheme():
                               tol=tol,
                               max_iter=max_iter,
                               verbose=verbose,
-                              case='bregman')
+                              case=case)
 
     def bic_score(self, loc_data, dir_data):
         X = np.concatenate([loc_data, dir_data], axis=1)
@@ -175,7 +184,14 @@ class OneShotScheme():
         n_params += 2  # alpha and beta
         return np.log(X.shape[0]) * n_params - 2 * ll
 
-    def plot(self, figsize: float = 6, arrow_scale: float = 12.0, title: str = None, save: bool = False):
+    def plot(self,
+             figsize: float = 6,
+             arrow_scale: float = 12.0,
+             name: str = None,
+             show_title: bool = False,
+             save: bool = False,
+             show: bool = True):
+
         ax = mps.field(show=False, figsize=figsize)
 
         n = self.n_components
@@ -197,8 +213,12 @@ class OneShotScheme():
                       length * dx, length * dy,
                       linewidth=0.8)
 
-        if title is not None:
-            plt.title(title)
+        if show_title:
+            plt.title(name)
         if save:
-            plt.savefig(f"plots/model_{title}.pdf", bbox_inches='tight')
-        plt.show()
+            plt.savefig(f"plots/model_{name}.pdf", bbox_inches='tight')
+            #plt.savefig(f"plots/model_{name}.png", bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
