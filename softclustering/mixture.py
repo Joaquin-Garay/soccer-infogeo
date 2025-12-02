@@ -207,6 +207,7 @@ class MixtureModel:
             max_iter: int = 1000,
             verbose: bool = False,
             case: str = "classic",
+            c_step: bool = False,
             ) -> list[float]:
         """
         Perform the Expectation-Maximization algorithm to fit a mixture model.
@@ -226,6 +227,17 @@ class MixtureModel:
             # E-step: Compute the posterior
             posterior, _, _, log_likelihood_arr = self._e_step(X)
             logger.append(float(np.dot(sample_weight, log_likelihood_arr))) #sample-weighted data log likelihood
+
+            # C-step: One-hot encoding of posterior matrix
+            if c_step:
+                idx = np.argmax(posterior, axis=1)  # shape (N,)
+                one_hot = np.zeros_like(posterior, dtype=float)
+                one_hot[np.arange(posterior.shape[0]), idx] = 1.0
+                if np.any(one_hot.sum(axis=0) == 0):
+                    # there is an empty cluster
+                    raise ValueError("Empty cluster")
+                else:
+                    posterior = one_hot
 
             # M-step: Maximize sample-weighted data log likelihood
             # update priors
