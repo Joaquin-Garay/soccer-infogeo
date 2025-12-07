@@ -39,6 +39,7 @@ class TwoLayerScheme:
         self.loc_n_clusters = loc_mixture.n_components
         if len(dir_mixtures) != self.loc_n_clusters:
             raise ValueError("Components in loc mixture and number of dir mixture don't match")
+
         self.dir_mixtures = dir_mixtures
 
     def fit(self,
@@ -48,46 +49,54 @@ class TwoLayerScheme:
             tol: float = 1e-4,
             max_iter: int = 1000,
             verbose: bool = False,
-            case: str = "classic",
+            m_step: str = "classic",
             c_step: bool = False,
-            ) -> None:
+            ) -> int:
+
+        if c_step and self.dir_mixtures[0].init != "k-means":
+            raise ValueError("To use Clasification EM, you need to specify k-means as your initialization for the direction mixtures.")
+
         loc_data = np.asarray(loc_data, dtype=float)
         dir_data = np.asarray(dir_data, dtype=float)
         n_obs = loc_data.shape[0]
         if n_obs != dir_data.shape[0]:
             raise ValueError("Location and direction number of observation don't match")
 
-        _ = self.loc_mixture.fit(loc_data,
+        _, it_loc = self.loc_mixture.fit(loc_data,
                                  sample_weight=None,
                                  tol=tol,
                                  max_iter=max_iter,
                                  verbose=verbose,
-                                 case=case,
+                                 m_step=m_step,
                                  c_step=c_step)
 
         # include a jitter in the posteriors probabilities
         loc_posteriors = self.loc_mixture.get_posteriors(loc_data) + _EPS
 
         # C-step: One-hot encoding of posterior matrix
-        if c_step:
-            idx = np.argmax(loc_posteriors, axis=1)  # shape (N,)
-            one_hot = np.zeros_like(loc_posteriors, dtype=float)
-            one_hot[np.arange(loc_posteriors.shape[0]), idx] = 1.0
-            if np.any(one_hot.sum(axis=0) == 0):
-                # there is an empty cluster
-                raise ValueError("Empty cluster")
-            else:
-                loc_posteriors = one_hot
+        # if c_step:
+        #     idx = np.argmax(loc_posteriors, axis=1)  # shape (N,)
+        #     one_hot = np.zeros_like(loc_posteriors, dtype=float)
+        #     one_hot[np.arange(loc_posteriors.shape[0]), idx] = 1.0
+        #     if np.any(one_hot.sum(axis=0) == 0):
+        #         # there is an empty cluster
+        #         raise ValueError("Empty cluster")
+        #     else:
+        #         loc_posteriors = one_hot
 
+        it_dir = 0
         for j in range(self.loc_n_clusters):
-            _ = self.dir_mixtures[j].fit(dir_data,
+            _, it_dir_component = self.dir_mixtures[j].fit(dir_data,
                                          sample_weight=loc_posteriors[:, j],
                                          tol=tol,
                                          max_iter=max_iter,
                                          verbose=verbose,
-                                         case=case,
-                                         # c_step=c_step,
+                                         m_step=m_step,
+                                         c_step=c_step,
                                          )
+            it_dir += it_dir_component
+
+        return it_loc + it_dir
 
     def log_pdf(self, loc_data: np.ndarray, dir_data: np.ndarray) -> np.ndarray:
         """
@@ -105,7 +114,7 @@ class TwoLayerScheme:
 
     def bic_penalty_term(self, n_obs):
         """ returns number of free parameters times log(n_obs) """
-        loc_n_params = self.loc_mixture.n_components - 1  # prior parameters
+        loc_n_params = self.loc_n_clusters - 1  # prior parameters
         loc_n_params += _num_free_params_for_component(self.loc_mixture.components[0]) * self.loc_n_clusters
 
         dir_n_params = 0
@@ -129,24 +138,46 @@ class TwoLayerScheme:
     def completed_bic_score(self, loc_data, dir_data):
         loc_data = np.asarray(loc_data, dtype=float)
         dir_data = np.asarray(dir_data, dtype=float)
+        N = loc_data.shape[0]
 
-        penalty = self.bic_penalty_term(loc_data.shape[0])
+        penalty = self.bic_penalty_term(N)
 
+        # Location mixture posteriors and assignments
         loc_posteriors = self.loc_mixture.get_posteriors(loc_data) + _EPS
-        idx_loc = np.argmax(loc_posteriors, axis=1)  # shape (N,)
-        log_prior_loc = np.log(self.loc_mixture.weights[idx_loc])  # shape (N,)
+        idx_loc = np.argmax(loc_posteriors, axis=1)  # (N,)
 
-        log_expfam_loc = np.zeros_like(log_prior_loc)
-        log_prior_dir = np.zeros_like(log_prior_loc)
-        log_expfam_dir = np.zeros_like(log_prior_loc)
+        # Precompute log weights for loc mixture
+        log_weights_loc = np.log(self.loc_mixture.weights)
+        log_prior_loc = log_weights_loc[idx_loc]  # (N,)
 
-        for i, idx in enumerate(idx_loc):
-            log_expfam_loc[i] = self.loc_mixture.components[idx].log_pdf(loc_data[i, :])
-            dir_mixture = self.dir_mixtures[idx]
-            dir_posteriors = dir_mixture.get_posteriors(dir_data)[i, :] + _EPS  # shape (K, )
-            idx_dir = np.argmax(dir_posteriors)  # scalar
-            log_prior_dir[i] = np.log(dir_mixture.weights[idx_dir])
-            log_expfam_dir[i] = dir_mixture.components[idx_dir].log_pdf(dir_data[i, :])
+        log_expfam_loc = np.empty(N)
+        log_prior_dir = np.empty(N)
+        log_expfam_dir = np.empty(N)
+
+        for j, loc_comp in enumerate(self.loc_mixture.components):
+            mask = (idx_loc == j)
+            if not np.any(mask):
+                continue
+
+            # mask is all loc_data assigned to component j
+            loc_block = loc_data[mask]
+            log_expfam_loc[mask] = loc_comp.log_pdf(loc_block)
+
+            # directional mixtures
+            dir_mixture = self.dir_mixtures[j]
+            dir_block = dir_data[mask]
+            dir_posteriors_block = dir_mixture.get_posteriors(dir_block) + _EPS  # (n_j, K_j)
+            idx_dir_block = np.argmax(dir_posteriors_block, axis=1)  # (n_j,)
+
+            # Precompute log weights for dir_mixture
+            log_weights_dir = np.log(dir_mixture.weights)
+            log_prior_dir[mask] = log_weights_dir[idx_dir_block]
+
+            # Compute dir log_pdf
+            indices = np.where(mask)[0]
+            for local_i, global_i in enumerate(indices):
+                k = idx_dir_block[local_i]
+                log_expfam_dir[global_i] = dir_mixture.components[k].log_pdf(dir_data[global_i])
 
         complete_data_likelihood = (log_prior_loc + log_expfam_loc
                           + log_prior_dir + log_expfam_dir).sum()
@@ -216,19 +247,20 @@ class OneShotScheme():
             tol: float = 1e-4,
             max_iter: int = 1000,
             verbose: bool = False,
-            case: str = "classic",
+            m_step: str = "classic",
             c_step: bool = False,
             ):
 
         X = np.concatenate([loc_data, dir_data], axis=1)
 
-        _ = self._mixture.fit(X,
+        _, it = self._mixture.fit(X,
                               sample_weight=None,
                               tol=tol,
                               max_iter=max_iter,
                               verbose=verbose,
-                              case=case,
+                              m_step=m_step,
                               c_step=c_step, )
+        return it
 
     def bic_score(self, loc_data, dir_data):
         X = np.concatenate([loc_data, dir_data], axis=1)

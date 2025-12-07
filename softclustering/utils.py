@@ -88,6 +88,9 @@ def add_noise(actions):
     noise = np.random.normal(0, 0.5, size=actions.loc[mask, ["end_x", "end_y"]].shape)
     actions.loc[mask, ["end_x", "end_y"]] += noise
 
+    actions.loc[mask, "end_x"] = actions.loc[mask, "end_x"].clip(lower=0, upper=105)
+    actions.loc[mask, "end_y"] = actions.loc[mask, "end_y"].clip(lower=0, upper=68)
+
     return actions
 
 def remove_outliers(actions, verbose=False):

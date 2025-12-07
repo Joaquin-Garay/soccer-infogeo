@@ -14,6 +14,7 @@ from sklearn.cluster import KMeans, kmeans_plusplus
 
 _EPS = 1e-9
 
+
 # -------------------- Mixture Model --------------------
 class MixtureModel:
     def __init__(self, components: list[ExponentialFamily],
@@ -134,6 +135,10 @@ class MixtureModel:
     def n_components(self) -> int:
         return len(self._components)
 
+    @property
+    def init(self):
+        return self._init
+
     def get_posteriors(self, X: np.ndarray):
         X = np.asarray(X, dtype=float)
         post, _, _, _ = self._e_step(X)
@@ -144,7 +149,7 @@ class MixtureModel:
         Data Log-likelihood
         """
         X = np.asarray(X, dtype=float)
-        _ , log_likelihood, _, _ = self._e_step(X)
+        _, log_likelihood, _, _ = self._e_step(X)
         return log_likelihood
 
     def get_expected_ll(self, X: np.ndarray):
@@ -152,7 +157,7 @@ class MixtureModel:
         Expected Complete-Data Log-likelihood (EM Q function)
         """
         X = np.asarray(X, dtype=float)
-        _ , _, expected_log_likelihood, _ = self._e_step(X)
+        _, _, expected_log_likelihood, _ = self._e_step(X)
         return expected_log_likelihood
 
     # ---- Densities ----
@@ -190,13 +195,15 @@ class MixtureModel:
         log_prior = np.log(self._weights + eps)  # (K,) := log prior_j
         log_p = self.log_pdf_components(X)  # (N, K) := log exp_family(x_i|theta_j)
         log_numerator = log_prior + log_p  # (N, K) := log prior_j + log exp_family(x_i|theta_j)
-        log_denominator = logsumexp(log_numerator, axis=1, keepdims=True)  # (N, 1) := log (sum_k (prior_k * exp_family(x_i|theta_k)) ) = log p(x_i)
+        log_denominator = logsumexp(log_numerator, axis=1,
+                                    keepdims=True)  # (N, 1) := log (sum_k (prior_k * exp_family(x_i|theta_k)) ) = log p(x_i)
         log_posterior = log_numerator - log_denominator  # (N, K) := log(posterior_{ij})
         posterior = np.exp(log_posterior)  # responsibilities (N, K)
 
-        log_likelihood = float(log_denominator.sum()) # data log likelihood as sum_i log(sum_j prior_j exp_family(x_i|theta_j))
+        log_likelihood = float(
+            log_denominator.sum())  # data log likelihood as sum_i log(sum_j prior_j exp_family(x_i|theta_j))
 
-        expected_log_likelihood = float(np.sum(log_numerator * posterior)) # expected complete-data log-likelihood
+        expected_log_likelihood = float(np.sum(log_numerator * posterior))  # expected complete-data log-likelihood
 
         return posterior, log_likelihood, expected_log_likelihood, log_denominator.flatten()
 
@@ -206,9 +213,9 @@ class MixtureModel:
             tol: float = 1e-4,
             max_iter: int = 1000,
             verbose: bool = False,
-            case: str = "classic",
+            m_step: str = "classic",
             c_step: bool = False,
-            ) -> list[float]:
+            ) -> Tuple[Sequence[float], int]:
         """
         Perform the Expectation-Maximization algorithm to fit a mixture model.
         It stops as soon as the absolute difference between two iterations is below the tolerance.
@@ -222,11 +229,12 @@ class MixtureModel:
             self._initialize(X, sample_weight)
 
         logger = []
+        it = 0
         for it in range(max_iter):
 
             # E-step: Compute the posterior
             posterior, _, _, log_likelihood_arr = self._e_step(X)
-            logger.append(float(np.dot(sample_weight, log_likelihood_arr))) #sample-weighted data log likelihood
+            logger.append(float(np.dot(sample_weight, log_likelihood_arr)))  # sample-weighted data log likelihood
 
             # C-step: One-hot encoding of posterior matrix
             if c_step:
@@ -235,7 +243,10 @@ class MixtureModel:
                 one_hot[np.arange(posterior.shape[0]), idx] = 1.0
                 if np.any(one_hot.sum(axis=0) == 0):
                     # there is an empty cluster
-                    raise ValueError("Empty cluster")
+                    if verbose:
+                        empty = np.where(one_hot.sum(axis=0) == 0)[0]
+                        print(f"Empty clusters: {empty} ")
+                    break
                 else:
                     posterior = one_hot
 
@@ -249,11 +260,8 @@ class MixtureModel:
                 self._weights = (self._weights + _EPS) / (1 + self.n_components * _EPS)
             # update distribution parameters
             for j, comp in enumerate(self._components):
-                comp.fit(X, sample_weight=sample_weight * posterior[:, j], case=case)
+                comp.fit(X, sample_weight=sample_weight * posterior[:, j], case=m_step)
 
-            # verbose
-            #if verbose:
-            #    print(f"Data log-likelihood at iter {it}: {logger[-1]:.2f}")
             # check convergence
             if it > 10 and abs(logger[-1] - logger[-2]) < tol:
                 if verbose:
@@ -262,7 +270,8 @@ class MixtureModel:
         else:
             if verbose:
                 print("Reached max_iter without full convergence.")
-        return logger
+
+        return logger, it
 
     # ---- Display ----
     @staticmethod

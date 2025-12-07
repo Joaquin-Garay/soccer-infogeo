@@ -6,7 +6,11 @@ Keep these pure functions stateless so they can be reused safely.
 """
 
 from __future__ import annotations
+
+from importlib.metadata import distributions
+
 import numpy as np
+from numpy.core.records import ndarray
 from scipy.special import i0e, i1e
 from .distributions import (
     ExponentialFamily,
@@ -77,7 +81,7 @@ def kl_div_vonmises(loc: float,
 
 
 def _num_free_params_for_component(comp: ExponentialFamily) -> int:
-    """Return the number of *free* parameters for a single component.
+    """Return the number of free parameters for a single component.
 
     We count independent degrees of freedom (e.g., full symmetric covariance has d(d+1)/2,
     not d^2). This is used for AIC/BIC.
@@ -112,15 +116,11 @@ def bic_score_mixture(X: np.ndarray,
                       ) -> float:
     """Bayesian Information Criterion (lower is better)."""
     X = np.asarray(X, dtype=float)
+    n = X.shape[0]
     ll = model.log_pdf(X).sum()
-    dist_params = model.components[0].params
     p = model.n_components - 1
-    for param in dist_params:
-        if isinstance(param, float):
-            p += 1 * model.n_components
-        else:
-            p += param.size * model.n_components
-    return np.log(X.shape[0]) * p - 2 * ll
+    p += _num_free_params_for_component(model.components[0]) * model.n_components
+    return np.log(n) * p - 2 * ll
 
 
 def aic_score_mixture(X: np.ndarray,
@@ -129,15 +129,31 @@ def aic_score_mixture(X: np.ndarray,
     """Akaike Information Criterion (lower is better)."""
     X = np.asarray(X, dtype=float)
     ll = model.log_pdf(X).sum()
-    dist_params = model.components[0].params
     p = model.n_components - 1
-    for param in dist_params:
-        if isinstance(param, float):
-            p += 1
-        else:
-            p += param.size * model.n_components
+    p += _num_free_params_for_component(model.components[0]) * model.n_components
     return 2 * p - 2 * ll
 
+def completed_bic_score_mixture(X: np.ndarray,
+                                model: MixtureModel,
+                                ) -> float:
+    """Complete data-likelihood BIC"""
+    X = np.asarray(X, dtype=float)
+    n = X.shape[0]
+    p = model.n_components - 1
+    p += _num_free_params_for_component(model.components[0]) * model.n_components
+    penalty = np.log(n) * p
+
+    posterior = model.get_posteriors(X)
+    idx_post = np.argmax(posterior, axis=1)  # shape (N,)
+    log_prior = np.log(model.weights[idx_post]) # shape (N,)
+
+    log_expfam = np.zeros_like(log_prior)
+    for i, idx in enumerate(idx_post):
+        log_expfam[i] = model.components[idx].log_pdf(X[i,:])
+
+    complete_data_likelihood = (log_prior + log_expfam).sum()
+
+    return penalty - 2.0 * complete_data_likelihood
 
 def hard_predict(X: np.ndarray,
                  model: MixtureModel,

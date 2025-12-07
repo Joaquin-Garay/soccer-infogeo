@@ -23,6 +23,7 @@ from .metrics import (
     kl_div_vonmises,
     bic_score_mixture,
     aic_score_mixture,
+    completed_bic_score_mixture,
     hard_predict,
     kl_ch_score,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "kl_div_vonmises",
     "bic_score_mixture",
     "aic_score_mixture",
+    "completed_bic_score_mixture",
     "hard_predict",
     "kl_ch_score",
     # models
